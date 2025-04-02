@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auth Endpoints Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button.secondary {
+            background-color: #6c757d;
+        }
+        button.secondary:hover {
+            background-color: #5a6268;
+        }
+        button.danger {
+            background-color: #dc3545;
+        }
+        button.danger:hover {
+            background-color: #c82333;
+        }
+        .response {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+            white-space: pre-wrap;
+        }
+        .error {
+            color: #d32f2f;
+            border-color: #d32f2f;
+        }
+        .success {
+            color: #4CAF50;
+            border-color: #4CAF50;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .section-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        .token-display {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            word-break: break-all;
+        }
+        .token-group {
+            margin-top: 10px;
+        }
+        .token-label {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Authentication Endpoints Test</h1>
+        
+        <!-- Register Section -->
+        <div class="section">
+            <div class="section-title">Register</div>
+            <div class="form-group">
+                <label for="reg-username">Username:</label>
+                <input type="text" id="reg-username" placeholder="Enter username">
+            </div>
+            <div class="form-group">
+                <label for="reg-email">Email:</label>
+                <input type="email" id="reg-email" placeholder="Enter email">
+            </div>
+            <div class="form-group">
+                <label for="reg-password">Password:</label>
+                <input type="password" id="reg-password" placeholder="Enter password">
+            </div>
+            <div class="button-group">
+                <button onclick="register()">Register</button>
+                <button class="secondary" onclick="clearForm('reg-')">Clear</button>
+            </div>
+            <div id="register-response" class="response"></div>
+        </div>
+
+        <!-- Login Section -->
+        <div class="section">
+            <div class="section-title">Login</div>
+            <div class="form-group">
+                <label for="login-email">Email:</label>
+                <input type="email" id="login-email" placeholder="Enter email">
+            </div>
+            <div class="form-group">
+                <label for="login-password">Password:</label>
+                <input type="password" id="login-password" placeholder="Enter password">
+            </div>
+            <div class="button-group">
+                <button onclick="login()">Login</button>
+                <button class="secondary" onclick="clearForm('login-')">Clear</button>
+            </div>
+            <div id="login-response" class="response"></div>
+            <div id="token-display" style="display: none;">
+                <div class="token-group">
+                    <div class="token-label">Access Token:</div>
+                    <div class="token-display" id="access-token-display"></div>
+                    <button onclick="copyToken('access-token-display')">Copy Access Token</button>
+                </div>
+                <div class="token-group">
+                    <div class="token-label">Refresh Token:</div>
+                    <div class="token-display" id="refresh-token-display"></div>
+                    <button onclick="copyToken('refresh-token-display')">Copy Refresh Token</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Token Refresh Section -->
+        <div class="section">
+            <div class="section-title">Refresh Token</div>
+            <div class="form-group">
+                <label for="refresh-token">Refresh Token:</label>
+                <input type="text" id="refresh-token" placeholder="Enter refresh token">
+            </div>
+            <div class="button-group">
+                <button onclick="refreshToken()">Refresh Token</button>
+                <button class="secondary" onclick="clearForm('refresh-')">Clear</button>
+            </div>
+            <div id="refresh-response" class="response"></div>
+        </div>
+
+        <!-- Logout Section -->
+        <div class="section">
+            <div class="section-title">Logout</div>
+            <div class="form-group">
+                <label for="logout-user-id">User ID:</label>
+                <input type="text" id="logout-user-id" placeholder="Enter user ID">
+            </div>
+            <div class="button-group">
+                <button onclick="logout()">Logout</button>
+                <button class="secondary" onclick="clearForm('logout-')">Clear</button>
+            </div>
+            <div id="logout-response" class="response"></div>
+        </div>
+
+        <!-- Delete User Section -->
+        <div class="section">
+            <div class="section-title">Delete User</div>
+            <div class="form-group">
+                <label for="delete-user-id">User ID:</label>
+                <input type="text" id="delete-user-id" placeholder="Enter user ID">
+            </div>
+            <div class="button-group">
+                <button class="danger" onclick="deleteUser()">Delete User</button>
+                <button class="secondary" onclick="clearForm('delete-')">Clear</button>
+            </div>
+            <div id="delete-response" class="response"></div>
+        </div>
+    </div>
+
+    <script>
+        // Store tokens globally
+        let accessToken = null;
+        let refreshToken = null;
+        const API_BASE_URL = 'http://localhost:5000';
+
+        // Helper function to log to console and display response
+        function logResponse(operation, response, elementId) {
+            console.log(`${operation} Response:`, response);
+            const element = document.getElementById(elementId);
+            element.textContent = JSON.stringify(response, null, 2);
+            element.className = `response ${response.error ? 'error' : 'success'}`;
+        }
+
+        // Helper function to clear form fields
+        function clearForm(prefix) {
+            const inputs = document.querySelectorAll(`input[id^="${prefix}"]`);
+            inputs.forEach(input => input.value = '');
+        }
+
+        // Helper function to copy token to clipboard
+        function copyToken(elementId) {
+            const tokenElement = document.getElementById(elementId);
+            const token = tokenElement.textContent;
+            navigator.clipboard.writeText(token).then(() => {
+                const button = tokenElement.nextElementSibling;
+                const originalText = button.textContent;
+                button.textContent = 'Copied!';
+                setTimeout(() => {
+                    button.textContent = originalText;
+                }, 2000);
+            });
+        }
+
+        // Helper function to update token display
+        function updateTokenDisplay() {
+            const tokenDisplay = document.getElementById('token-display');
+            const accessTokenDisplay = document.getElementById('access-token-display');
+            const refreshTokenDisplay = document.getElementById('refresh-token-display');
+
+            if (accessToken && refreshToken) {
+                tokenDisplay.style.display = 'block';
+                accessTokenDisplay.textContent = accessToken;
+                refreshTokenDisplay.textContent = refreshToken;
+            } else {
+                tokenDisplay.style.display = 'none';
+            }
+        }
+
+        // Register endpoint
+        window.register = async function() {
+            const username = document.getElementById('reg-username').value;
+            const email = document.getElementById('reg-email').value;
+            const password = document.getElementById('reg-password').value;
+
+            console.log('Registering user:', { username, email });
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/register`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, email, password })
+                });
+
+                const data = await response.json();
+                logResponse('Register', data, 'register-response');
+            } catch (error) {
+                console.error('Register Error:', error);
+                logResponse('Register', { error: error.message }, 'register-response');
+            }
+        }
+
+        // Login endpoint
+        window.login = async function() {
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+
+            console.log('Logging in user:', { email });
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email, password })
+                });
+
+                const data = await response.json();
+                if (data.tokens) {
+                    accessToken = data.tokens.access_token;
+                    refreshToken = data.tokens.refresh_token;
+                    console.log('Tokens received:', { accessToken, refreshToken });
+                    updateTokenDisplay();
+                    
+                    // Auto-fill user ID in logout and delete forms
+                    if (data.user && data.user.id) {
+                        document.getElementById('logout-user-id').value = data.user.id;
+                        document.getElementById('delete-user-id').value = data.user.id;
+                    }
+                }
+                logResponse('Login', data, 'login-response');
+            } catch (error) {
+                console.error('Login Error:', error);
+                logResponse('Login', { error: error.message }, 'login-response');
+            }
+        }
+
+        // Refresh token endpoint
+        window.refreshToken = async function() {
+            const token = document.getElementById('refresh-token').value || refreshToken;
+
+            if (!token) {
+                console.error('No refresh token provided');
+                logResponse('Refresh Token', { error: 'No refresh token provided' }, 'refresh-response');
+                return;
+            }
+
+            console.log('Refreshing token');
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/refresh-token`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ refresh_token: token })
+                });
+
+                const data = await response.json();
+                if (data.access_token) {
+                    accessToken = data.access_token;
+                    refreshToken = data.refresh_token;
+                    console.log('Tokens refreshed:', { accessToken, refreshToken });
+                    updateTokenDisplay();
+                }
+                logResponse('Refresh Token', data, 'refresh-response');
+            } catch (error) {
+                console.error('Refresh Token Error:', error);
+                logResponse('Refresh Token', { error: error.message }, 'refresh-response');
+            }
+        }
+
+        // Logout endpoint
+        window.logout = async function() {
+            const userId = document.getElementById('logout-user-id').value;
+
+            if (!userId) {
+                console.error('No user ID provided');
+                logResponse('Logout', { error: 'No user ID provided' }, 'logout-response');
+                return;
+            }
+
+            console.log('Logging out user:', userId);
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/logout`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ user_id: userId })
+                });
+
+                const data = await response.json();
+                if (data.message === 'Logged out successfully') {
+                    accessToken = null;
+                    refreshToken = null;
+                    updateTokenDisplay();
+                    console.log('User logged out successfully');
+                }
+                logResponse('Logout', data, 'logout-response');
+            } catch (error) {
+                console.error('Logout Error:', error);
+                logResponse('Logout', { error: error.message }, 'logout-response');
+            }
+        }
+
+        // Delete user endpoint
+        window.deleteUser = async function() {
+            const userId = document.getElementById('delete-user-id').value;
+
+            if (!userId) {
+                console.error('No user ID provided');
+                logResponse('Delete User', { error: 'No user ID provided' }, 'delete-response');
+                return;
+            }
+
+            if (!confirm('Are you sure you want to delete this user? This action cannot be undone.')) {
+                return;
+            }
+
+            console.log('Deleting user:', userId);
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/delete-user`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ user_id: userId })
+                });
+
+                const data = await response.json();
+                if (data.message && data.message.includes('deleted successfully')) {
+                    accessToken = null;
+                    refreshToken = null;
+                    updateTokenDisplay();
+                }
+                logResponse('Delete User', data, 'delete-response');
+            } catch (error) {
+                console.error('Delete User Error:', error);
+                logResponse('Delete User', { error: error.message }, 'delete-response');
+            }
+        }
+    </script>
+</body>
+</html> 

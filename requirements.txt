@@ -1,0 +1,46 @@
+pip==25.0.1
+
+
+# Flask and related packages
+Flask==3.1.0
+Flask-SQLAlchemy==2.5.1
+Flask-Limiter==2.7.0
+Flask-CORS==3.0.10
+Jinja2==3.1.2  # Added Jinja2 for template rendering
+
+Authentication
+PyJWT==2.6.0
+bcrypt
+
+# HTTP requests
+requests==2.31.0
+
+# WSGI server
+gunicorn==20.1.0
+
+# For managing environment variables
+python-dotenv==1.0.0
+
+# Database driver for PostgreSQL
+psycopg2-binary==2.9.6
+
+# For linting and formatting (optional)
+pylint==2.17.5
+flake8==6.0.0
+black==23.1.0
+
+# YAML support
+PyYAML==6.0.1
+
+# Redis Security
+cryptography>=41.0.0
+redis>=4.5.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+flask-socketio>=5.3.6
+python-socketio>=5.11.1
+python-engineio>=4.9.0
+eventlet>=0.35.2
