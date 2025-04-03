@@ -120,8 +120,10 @@ class WebSocketModule:
     def _validate_token(self, token: str) -> Optional[Dict[str, Any]]:
         """Validate JWT token and return user data if valid."""
         try:
-            # Validate the token
-            payload = self.jwt_manager.verify_token(token, TokenType.ACCESS)
+            # Validate the token - accept both access and websocket tokens
+            payload = self.jwt_manager.verify_token(token, TokenType.ACCESS) or \
+                     self.jwt_manager.verify_token(token, TokenType.WEBSOCKET)
+                     
             if not payload:
                 return None
                 
@@ -176,11 +178,17 @@ class WebSocketModule:
             'user_id': user_data['id'],
             'username': user_data['username'],
             'connected_at': datetime.utcnow().isoformat(),
-            'last_active': datetime.utcnow().isoformat()
+            'last_active': datetime.utcnow().isoformat(),
+            'token': token,  # Store token for reconnection validation
+            'rooms': set()  # Track rooms this session is in
         }
+        
+        # Store session data in Redis with expiration
         self.websocket_manager.store_session_data(session_id, session_data)
         
-        # Don't automatically join any room
+        # Send session data to client
+        self.websocket_manager.socketio.emit('session_data', session_data, room=session_id)
+        
         custom_log(f"New WebSocket connection: {session_id} from {origin} for user {user_data['id']}")
         return {'status': 'connected', 'session_id': session_id}
 
@@ -210,100 +218,246 @@ class WebSocketModule:
         self.websocket_manager.cleanup_session(session_id)
         custom_log(f"WebSocket disconnected: {session_id}")
 
-    def _handle_join(self, data: Dict[str, Any], session_data: Dict[str, Any]):
-        """Handle joining a room with authentication and permission checks."""
-        session_id = request.sid
-        room_id = data.get('room_id')
-        if not room_id:
-            raise ValueError("room_id is required")
-            
-        # Get user roles from session data
-        user_roles = set(session_data.get('roles', []))
-        
-        # Check room access permission
-        if not self._check_room_access(room_id, session_data['user_id'], user_roles):
-            custom_log(f"Access denied for user {session_data['user_id']} to room {room_id}")
-            return {'status': 'error', 'message': 'Access denied to room'}
-        
-        self.websocket_manager.join_room(room_id, session_id)
-        return {'status': 'joined', 'room_id': room_id}
-
-    def _handle_leave(self, data: Dict[str, Any], session_data: Dict[str, Any]):
-        """Handle leaving a room with authentication."""
-        session_id = request.sid
-        room_id = data.get('room_id')
-        if not room_id:
-            raise ValueError("room_id is required")
-        
-        self.websocket_manager.leave_room(room_id, session_id)
-        return {'status': 'left', 'room_id': room_id}
-
-    def _handle_message(self, data: Dict[str, Any], session_data: Dict[str, Any]):
-        """Handle incoming messages with authentication."""
-        session_id = request.sid
-        message = data.get('message')
-        room_id = data.get('room_id')
-        
-        if not message:
-            raise ValueError("message is required")
-            
-        # Check rate limits for messages
-        if not self.websocket_manager.check_rate_limit(session_data['client_id'], 'messages'):
-            return {'status': 'error', 'message': 'Rate limit exceeded'}
-            
-        # Update rate limits
-        self.websocket_manager.update_rate_limit(session_data['client_id'], 'messages')
-        
-        # Broadcast message to room or all connected clients
-        if room_id:
-            self.websocket_manager.broadcast_to_room(room_id, 'message', {
-                'message': message,
-                'user_id': session_data['user_id'],
-                'timestamp': datetime.utcnow().isoformat()
-            })
-        else:
-            self.websocket_manager.broadcast_to_all('message', {
-                'message': message,
-                'user_id': session_data['user_id'],
-                'timestamp': datetime.utcnow().isoformat()
-            })
-            
-        return {'status': 'sent'}
-
-    def _handle_button_press(self, data: Dict[str, Any]):
-        """Handle button press events."""
-        session_id = request.sid
-        
-        # Update counter in Redis
-        counter_key = f"button_counter:{self.button_counter_room}"
-        current_count = self.redis_manager.incr(counter_key)
-        
-        # Broadcast updated count to room
-        self.websocket_manager.broadcast_to_room(
-            self.button_counter_room,
-            'counter_update',
-            {'count': current_count}
-        )
-        
-        return {'status': 'success', 'count': current_count}
-
-    def _handle_get_counter(self, data: Dict[str, Any]):
-        """Handle getting the current counter value."""
-        counter_key = f"button_counter:{self.button_counter_room}"
-        current_count = self.redis_manager.get(counter_key) or 0
-        return {'status': 'success', 'count': current_count}
-
-    def _handle_get_users(self, data: Dict[str, Any]):
-        """Handle getting the list of connected users."""
-        room_members = self.get_room_members(self.button_counter_room)
-        users = []
-        
-        for session_id in room_members:
+    def _handle_join(self, data):
+        """Handle join room event."""
+        try:
+            room_id = data.get('room_id')
+            if not room_id:
+                custom_log("No room_id provided in join event")
+                return
+                
+            # Get session data from WebSocket manager
+            session_id = request.sid
             session_data = self.websocket_manager.get_session_data(session_id)
-            if session_data and 'username' in session_data:
-                users.append(session_data['username'])
-        
-        return {'status': 'success', 'users': users}
+            if not session_data:
+                custom_log("No session data found for join event")
+                return
+                
+            # Check if user is already in the room
+            if room_id in session_data.get('rooms', set()):
+                custom_log(f"User {session_data.get('username')} already in room {room_id}")
+                return
+                
+            # Join room
+            self.websocket_manager.join_room(room_id, session_id)
+            
+            # Update session data with room membership
+            session_data['rooms'].add(room_id)
+            self.websocket_manager.store_session_data(session_id, session_data)
+            
+            # Update room permissions
+            self.websocket_manager._update_room_permissions(room_id, session_id, session_data)
+            
+            # Broadcast join event
+            self.websocket_manager.socketio.emit('user_joined', {
+                'room_id': room_id,
+                'user_id': session_data.get('user_id'),
+                'username': session_data.get('username')
+            }, room=room_id)
+            
+            # Send current room state to the joining user
+            self._send_room_state(room_id, session_id)
+            
+            custom_log(f"User {session_data.get('username')} joined room {room_id}")
+            
+        except Exception as e:
+            custom_log(f"Error in join handler: {str(e)}")
+            
+    def _send_room_state(self, room_id: str, session_id: str):
+        """Send current room state to a user."""
+        try:
+            # Get room members
+            room_members = self.websocket_manager.get_room_members(room_id)
+            users = []
+            
+            for member_id in room_members:
+                member_data = self.websocket_manager.get_session_data(member_id)
+                if member_data:
+                    users.append({
+                        'user_id': member_data.get('user_id'),
+                        'username': member_data.get('username')
+                    })
+            
+            # Get current counter value
+            counter_key = f"button_counter:{room_id}"
+            current_count = self.redis_manager.get(counter_key) or 0
+            
+            # Send room state
+            self.websocket_manager.socketio.emit('room_state', {
+                'room_id': room_id,
+                'users': users,
+                'counter': current_count
+            }, room=session_id)
+            
+        except Exception as e:
+            custom_log(f"Error sending room state: {str(e)}")
+
+    def _handle_leave(self, data):
+        """Handle leave room event."""
+        try:
+            room_id = data.get('room_id')
+            if not room_id:
+                custom_log("No room_id provided in leave event")
+                return
+                
+            # Get session data from WebSocket manager
+            session_id = request.sid
+            session_data = self.websocket_manager.get_session_data(session_id)
+            if not session_data:
+                custom_log("No session data found for leave event")
+                return
+                
+            # Check if user is in the room
+            if room_id not in session_data.get('rooms', set()):
+                custom_log(f"User {session_data.get('username')} not in room {room_id}")
+                return
+                
+            # Leave room
+            self.websocket_manager.leave_room(room_id, session_id)
+            
+            # Update session data to remove room membership
+            session_data['rooms'].remove(room_id)
+            self.websocket_manager.store_session_data(session_id, session_data)
+            
+            # Broadcast leave event
+            self.websocket_manager.socketio.emit('user_left', {
+                'room_id': room_id,
+                'user_id': session_data.get('user_id'),
+                'username': session_data.get('username')
+            }, room=room_id)
+            
+            custom_log(f"User {session_data.get('username')} left room {room_id}")
+            
+        except Exception as e:
+            custom_log(f"Error in leave handler: {str(e)}")
+
+    def _handle_message(self, data):
+        """Handle message event."""
+        try:
+            room_id = data.get('room_id')
+            message = data.get('message')
+            if not room_id or not message:
+                custom_log("Missing room_id or message in message event")
+                return
+                
+            # Get session data from WebSocket manager
+            session_id = request.sid
+            session_data = self.websocket_manager.get_session_data(session_id)
+            if not session_data:
+                custom_log("No session data found for message event")
+                return
+                
+            # Broadcast message
+            self.websocket_manager.socketio.emit('message', {
+                'room_id': room_id,
+                'user_id': session_data.get('user_id'),
+                'username': session_data.get('username'),
+                'message': message,
+                'timestamp': datetime.utcnow().isoformat()
+            }, room=room_id)
+            
+            custom_log(f"Message from {session_data.get('username')} in room {room_id}")
+            
+        except Exception as e:
+            custom_log(f"Error in message handler: {str(e)}")
+
+    def _handle_button_press(self, data):
+        """Handle button press event."""
+        try:
+            room_id = data.get('room_id')
+            if not room_id:
+                custom_log("No room_id provided in button press event")
+                return
+                
+            # Get session data from WebSocket manager
+            session_id = request.sid
+            session_data = self.websocket_manager.get_session_data(session_id)
+            if not session_data:
+                custom_log("No session data found for button press event")
+                return
+                
+            # Update counter in Redis
+            counter_key = f"button_counter:{room_id}"
+            current_count = self.redis_manager.incr(counter_key)
+            
+            # Broadcast updated count to room
+            self.websocket_manager.socketio.emit('counter_update', {
+                'room_id': room_id,
+                'count': current_count
+            }, room=room_id)
+            
+            custom_log(f"Button pressed by {session_data.get('username')} in room {room_id}")
+            
+        except Exception as e:
+            custom_log(f"Error in button press handler: {str(e)}")
+
+    def _handle_get_counter(self, data):
+        """Handle get counter event."""
+        try:
+            room_id = data.get('room_id')
+            if not room_id:
+                custom_log("No room_id provided in get counter event")
+                return
+                
+            # Get session data from WebSocket manager
+            session_id = request.sid
+            session_data = self.websocket_manager.get_session_data(session_id)
+            if not session_data:
+                custom_log("No session data found for get counter event")
+                return
+                
+            # Get counter value from Redis
+            counter_key = f"button_counter:{room_id}"
+            current_count = self.redis_manager.get(counter_key) or 0
+            
+            # Send counter value to client
+            self.websocket_manager.socketio.emit('counter_update', {
+                'room_id': room_id,
+                'count': current_count
+            }, room=session_id)
+            
+            custom_log(f"Counter value sent to {session_data.get('username')} for room {room_id}")
+            
+        except Exception as e:
+            custom_log(f"Error in get counter handler: {str(e)}")
+
+    def _handle_get_users(self, data):
+        """Handle get users event."""
+        try:
+            room_id = data.get('room_id')
+            if not room_id:
+                custom_log("No room_id provided in get users event")
+                return
+                
+            # Get session data from WebSocket manager
+            session_id = request.sid
+            session_data = self.websocket_manager.get_session_data(session_id)
+            if not session_data:
+                custom_log("No session data found for get users event")
+                return
+                
+            # Get room members
+            room_members = self.websocket_manager.get_room_members(room_id)
+            users = []
+            
+            for member_id in room_members:
+                member_data = self.websocket_manager.get_session_data(member_id)
+                if member_data:
+                    users.append({
+                        'user_id': member_data.get('user_id'),
+                        'username': member_data.get('username')
+                    })
+            
+            # Send users list to client
+            self.websocket_manager.socketio.emit('users_list', {
+                'room_id': room_id,
+                'users': users
+            }, room=session_id)
+            
+            custom_log(f"Users list sent to {session_data.get('username')} for room {room_id}")
+            
+        except Exception as e:
+            custom_log(f"Error in get users handler: {str(e)}")
 
     def broadcast_to_room(self, room_id: str, event: str, data: Any):
         """Broadcast message to a specific room."""

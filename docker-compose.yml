@@ -17,7 +17,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: silvella/template_three_flask_app:latest
+    image: silvella/recall_flask_app:latest
     container_name: ${FLASK_SERVICE_NAME}
     environment:
       - PYTHONPATH=${PYTHONPATH}
@@ -54,7 +54,7 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - template_three_app_network
+      - recall_app_network
     command: >
       sh -c "
       pip install --no-cache-dir -r /app/requirements.txt &&
@@ -94,7 +94,7 @@ services:
     secrets:
       - postgres_password
     networks:
-      - template_three_app_network
+      - recall_app_network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -113,7 +113,7 @@ services:
     secrets:
       - redis_password
     networks:
-      - template_three_app_network
+      - recall_app_network
     healthcheck:
       test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
       interval: 5s
@@ -126,8 +126,8 @@ services:
       "
 
 networks:
-  template_three_app_network:
-    name: template_three_app_network
+  recall_app_network:
+    name: recall_app_network
     driver: bridge
 
 volumes:

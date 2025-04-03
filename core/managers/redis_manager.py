@@ -27,6 +27,8 @@ class RedisManager:
             self.connection_pool = None
             self._initialize_connection_pool()
             self._setup_encryption()
+            self._token_prefix = "token"
+            self._token_set_prefix = "tokens"
             RedisManager._initialized = True
 
     def _setup_encryption(self):
@@ -435,4 +437,121 @@ class RedisManager:
             
         except Exception as e:
             custom_log(f"Error cleaning up room keys for {room_id}: {str(e)}")
+            return False
+
+    def _ensure_connection(self):
+        """Ensure Redis connection is active."""
+        try:
+            if not self.redis or not self.redis.ping():
+                self._initialize_connection_pool()
+            return True
+        except Exception as e:
+            custom_log(f"❌ Redis connection check failed: {e}")
+            return False
+
+    def _generate_token_key(self, token_type: str, token: str) -> str:
+        """Generate a secure key for token storage."""
+        return f"{self._token_prefix}:{token_type}:{token}"
+
+    def _generate_token_set_key(self, token_type: str) -> str:
+        """Generate a secure key for token set storage."""
+        return f"{self._token_set_prefix}:{token_type}"
+
+    def store_token(self, token_type: str, token: str, expire: int = 1800) -> bool:
+        """Store a token with proper key generation and expiration."""
+        try:
+            if not self._ensure_connection():
+                return False
+
+            # Store token with expiration
+            token_key = self._generate_token_key(token_type, token)
+            if not self.set(token_key, "1", expire=expire):
+                return False
+
+            # Add to token set
+            set_key = self._generate_token_set_key(token_type)
+            self.redis.sadd(set_key, token)
+            
+            # Set expiration on the set as well
+            self.redis.expire(set_key, expire)
+            
+            return True
+        except Exception as e:
+            custom_log(f"❌ Error storing token: {e}")
+            return False
+
+    def is_token_valid(self, token_type: str, token: str) -> bool:
+        """Check if a token exists and is valid."""
+        try:
+            if not self._ensure_connection():
+                return False
+
+            token_key = self._generate_token_key(token_type, token)
+            return self.exists(token_key)
+        except Exception as e:
+            custom_log(f"❌ Error checking token validity: {e}")
+            return False
+
+    def revoke_token(self, token_type: str, token: str) -> bool:
+        """Revoke a token by removing it from both storage and set."""
+        try:
+            if not self._ensure_connection():
+                return False
+
+            # Remove token
+            token_key = self._generate_token_key(token_type, token)
+            self.delete(token_key)
+
+            # Remove from set
+            set_key = self._generate_token_set_key(token_type)
+            self.redis.srem(set_key, token)
+
+            return True
+        except Exception as e:
+            custom_log(f"❌ Error revoking token: {e}")
+            return False
+
+    def cleanup_expired_tokens(self, token_type: str) -> bool:
+        """Clean up expired tokens for a specific type."""
+        try:
+            if not self._ensure_connection():
+                return False
+
+            set_key = self._generate_token_set_key(token_type)
+            tokens = self.redis.smembers(set_key) or set()
+
+            for token in tokens:
+                token_key = self._generate_token_key(token_type, token)
+                if not self.exists(token_key):
+                    # Token has expired, remove from set
+                    self.redis.srem(set_key, token)
+                    custom_log(f"Cleaned up expired {token_type} token")
+
+            return True
+        except Exception as e:
+            custom_log(f"❌ Error cleaning up expired tokens: {e}")
+            return False
+
+    def get_token_ttl(self, token_type: str, token: str) -> int:
+        """Get remaining TTL for a token."""
+        try:
+            if not self._ensure_connection():
+                return -1
+
+            token_key = self._generate_token_key(token_type, token)
+            return self.ttl(token_key)
+        except Exception as e:
+            custom_log(f"❌ Error getting token TTL: {e}")
+            return -1
+
+    def extend_token_ttl(self, token_type: str, token: str, seconds: int) -> bool:
+        """Extend the TTL of a token."""
+        try:
+            if not self._ensure_connection():
+                return False
+
+            token_key = self._generate_token_key(token_type, token)
+            return self.expire(token_key, seconds)
+        except Exception as e:
+            custom_log(f"❌ Error extending token TTL: {e}")
             return False 

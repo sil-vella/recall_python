@@ -80,11 +80,38 @@ class WebSocketManager:
 
     def store_session_data(self, session_id: str, session_data: Dict[str, Any]):
         """Store session information in Redis."""
-        self.redis_manager.set(f"ws:session:{session_id}", session_data, expire=Config.WS_SESSION_TTL)
+        try:
+            # Convert sets to lists for Redis storage
+            data_to_store = session_data.copy()
+            if 'rooms' in data_to_store and isinstance(data_to_store['rooms'], set):
+                data_to_store['rooms'] = list(data_to_store['rooms'])
+            if 'user_roles' in data_to_store and isinstance(data_to_store['user_roles'], set):
+                data_to_store['user_roles'] = list(data_to_store['user_roles'])
+            
+            # Convert any integers to strings
+            if 'user_id' in data_to_store and isinstance(data_to_store['user_id'], int):
+                data_to_store['user_id'] = str(data_to_store['user_id'])
+            
+            # Store in Redis with expiration
+            self.redis_manager.set(f"ws:session:{session_id}", data_to_store, expire=Config.WS_SESSION_TTL)
+            custom_log(f"Stored session data for {session_id}")
+        except Exception as e:
+            custom_log(f"Error storing session data: {str(e)}")
 
     def get_session_data(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session data from Redis."""
-        return self.redis_manager.get(f"ws:session:{session_id}")
+        try:
+            data = self.redis_manager.get(f"ws:session:{session_id}")
+            if data:
+                # Convert lists back to sets
+                if 'rooms' in data:
+                    data['rooms'] = set(data['rooms'])
+                if 'user_roles' in data:
+                    data['user_roles'] = set(data['user_roles'])
+            return data
+        except Exception as e:
+            custom_log(f"Error getting session data: {str(e)}")
+            return None
 
     def cleanup_session_data(self, session_id: str):
         """Clean up session data from Redis."""
@@ -92,58 +119,73 @@ class WebSocketManager:
 
     def update_session_activity(self, session_id: str):
         """Update last active timestamp for session."""
-        session_key = f"ws:session:{session_id}"
-        session_data = self.redis_manager.get(session_key)
-        if session_data:
-            session_data['last_active'] = datetime.utcnow().isoformat()
-            self.redis_manager.set(session_key, session_data)
+        try:
+            session_key = f"ws:session:{session_id}"
+            session_data = self.redis_manager.get(session_key)
+            if session_data:
+                session_data['last_active'] = datetime.utcnow().isoformat()
+                # Convert sets to lists before storing
+                if 'rooms' in session_data and isinstance(session_data['rooms'], set):
+                    session_data['rooms'] = list(session_data['rooms'])
+                if 'user_roles' in session_data and isinstance(session_data['user_roles'], set):
+                    session_data['user_roles'] = list(session_data['user_roles'])
+                self.redis_manager.set(session_key, session_data)
+                custom_log(f"Updated session activity for {session_id}")
+        except Exception as e:
+            custom_log(f"Error updating session activity: {str(e)}")
 
     def initialize(self, app):
         """Initialize WebSocket support with the Flask app."""
         try:
+            custom_log("Starting WebSocket initialization...")
             self.socketio.init_app(app, cors_allowed_origins="*")
             
             @self.socketio.on('connect')
             def handle_connect():
                 try:
-                    custom_log("New WebSocket connection attempt")
                     session_id = request.sid
+                    custom_log(f"New WebSocket connection attempt from session {session_id}")
+                    custom_log(f"Connection headers: {dict(request.headers)}")
+                    custom_log(f"Connection args: {dict(request.args)}")
                     
                     # Get token from request
                     token = request.args.get('token')
                     if not token:
-                        custom_log("No token provided for WebSocket connection")
+                        custom_log(f"No token provided for WebSocket connection from session {session_id}")
                         return False
                         
                     # Validate token with JWT manager
                     if not self._jwt_manager:
-                        custom_log("JWT manager not initialized")
+                        custom_log(f"JWT manager not initialized for session {session_id}")
                         return False
                         
-                    # Verify token and get payload
-                    payload = self._jwt_manager.verify_token(token)
+                    # Verify token and get payload - accept both access and websocket tokens
+                    custom_log(f"Verifying token for session {session_id}")
+                    payload = self._jwt_manager.verify_token(token, TokenType.ACCESS) or \
+                             self._jwt_manager.verify_token(token, TokenType.WEBSOCKET)
+                             
                     if not payload:
-                        custom_log("Invalid token for WebSocket connection")
+                        custom_log(f"Invalid token for WebSocket connection from session {session_id}")
                         return False
                         
-                    # Check token type
-                    if payload.get('type') != 'websocket':
-                        custom_log("Invalid token type for WebSocket connection")
-                        return False
-                        
-                    # Check client fingerprint
-                    client_fingerprint = self._jwt_manager._get_client_fingerprint()
-                    if client_fingerprint and client_fingerprint != payload.get('fingerprint'):
-                        custom_log("Token fingerprint mismatch")
-                        return False
-                        
+                    custom_log(f"Token verified for session {session_id}, payload: {payload}")
+                    
                     # Store session data
                     session_data = {
                         'user_id': payload.get('id'),
                         'username': payload.get('username'),
                         'token': token,
-                        'connected_at': datetime.utcnow().isoformat()
+                        'token_type': payload.get('type'),
+                        'connected_at': datetime.utcnow().isoformat(),
+                        'last_active': datetime.utcnow().isoformat(),
+                        'rooms': set(),  # Track rooms this session is in
+                        'client_id': request.headers.get('X-Client-ID', session_id),
+                        'origin': request.headers.get('Origin', '')
                     }
+                    
+                    custom_log(f"Storing session data for {session_id}: {session_data}")
+                    
+                    # Store session data in Redis with expiration
                     self.store_session_data(session_id, session_data)
                     
                     # Update session activity
@@ -151,13 +193,18 @@ class WebSocketManager:
                     
                     # Mark user as online
                     if session_data.get('user_id'):
+                        custom_log(f"Marking user {session_data['user_id']} as online")
                         self.update_user_presence(session_data['user_id'], 'online')
+                    
+                    # Send session data to client
+                    custom_log(f"Sending session data to client {session_id}")
+                    self.socketio.emit('session_data', session_data, room=session_id)
                     
                     custom_log(f"WebSocket connection established for session {session_id}")
                     return True
                     
                 except Exception as e:
-                    custom_log(f"Error in connect handler: {str(e)}")
+                    custom_log(f"Error in connect handler for session {request.sid}: {str(e)}")
                     return False
 
             @self.socketio.on('disconnect')
@@ -165,9 +212,85 @@ class WebSocketManager:
                 try:
                     session_id = request.sid
                     custom_log(f"WebSocket disconnection for session {session_id}")
-                    self.cleanup_session(session_id)
+                    
+                    # Get session data before cleanup
+                    session_data = self.get_session_data(session_id)
+                    if session_data:
+                        custom_log(f"Found session data for {session_id}: {session_data}")
+                        
+                        # Revoke the token if it exists
+                        token = session_data.get('token')
+                        if token and self._jwt_manager:
+                            custom_log(f"Revoking token for session {session_id}")
+                            self._jwt_manager.revoke_token(token)
+                        
+                        # Leave all rooms
+                        for room_id in session_data.get('rooms', set()):
+                            custom_log(f"Leaving room {room_id} for session {session_id}")
+                            self.leave_room(room_id, session_id)
+                            
+                        # Mark user as offline
+                        if session_data.get('user_id'):
+                            custom_log(f"Marking user {session_data['user_id']} as offline")
+                            self.update_user_presence(session_data['user_id'], 'offline')
+                    else:
+                        custom_log(f"No session data found for {session_id} during disconnect")
+                    
+                    # Clean up session data
+                    custom_log(f"Cleaning up session data for {session_id}")
+                    self.cleanup_session_data(session_id)
+                    
+                    # Clean up rate limit data
+                    if session_data and session_data.get('client_id'):
+                        custom_log(f"Cleaning up rate limit data for client {session_data['client_id']}")
+                        for limit_type in self._rate_limits:
+                            key = f"ws:{limit_type}:{session_data['client_id']}"
+                            self.redis_manager.delete(key)
+                    
                 except Exception as e:
-                    custom_log(f"Error in disconnect handler: {str(e)}")
+                    custom_log(f"Error in disconnect handler for session {request.sid}: {str(e)}")
+
+            @self.socketio.on('join')
+            def handle_join(data):
+                try:
+                    session_id = request.sid
+                    custom_log(f"Join request received for session {session_id}: {data}")
+                    
+                    # Get room ID from request
+                    room_id = data.get('room_id')
+                    if not room_id:
+                        custom_log(f"No room_id provided in join request for session {session_id}")
+                        self.socketio.emit('error', {'message': 'Room ID required'}, room=session_id)
+                        return
+                        
+                    # Get session data
+                    session_data = self.get_session_data(session_id)
+                    if not session_data:
+                        custom_log(f"No session data found for join request from session {session_id}")
+                        self.socketio.emit('error', {'message': 'Session not found'}, room=session_id)
+                        return
+                        
+                    custom_log(f"Attempting to join room {room_id} for session {session_id}")
+                    
+                    # Join room
+                    if self.join_room(room_id, session_id):
+                        custom_log(f"Successfully joined room {room_id} for session {session_id}")
+                        self.socketio.emit('join_response', {
+                            'success': True,
+                            'room_id': room_id,
+                            'message': 'Successfully joined room'
+                        }, room=session_id)
+                    else:
+                        custom_log(f"Failed to join room {room_id} for session {session_id}")
+                        self.socketio.emit('join_response', {
+                            'success': False,
+                            'room_id': room_id,
+                            'message': 'Failed to join room'
+                        }, room=session_id)
+                        
+                except Exception as e:
+                    custom_log(f"Error in join handler for session {request.sid}: {str(e)}")
+                    self.socketio.emit('error', {'message': str(e)}, room=request.sid)
 
             custom_log("WebSocket support initialized with Flask app")
         except Exception as e:
@@ -183,21 +306,95 @@ class WebSocketManager:
         self._room_access_check = access_check_func
         custom_log("Room access check function set")
 
-    def check_room_access(self, room_id: str, session_data: Dict[str, Any]) -> bool:
-        """Check if a user has access to a room using the module's access check function."""
-        if not self._room_access_check:
-            custom_log("No room access check function set")
-            return False
+    def _update_room_permissions(self, room_id: str, room_data: Dict[str, Any], session_id: Optional[str] = None):
+        """Update room permissions."""
+        try:
+            custom_log(f"Updating permissions for room {room_id}")
             
-        # Extract user_id and roles from session data
-        user_id = session_data.get('user_id')
-        user_roles = session_data.get('user_roles', set())
-        
-        if not user_id:
-            custom_log("No user_id found in session data")
-            return False
+            # Convert any sets to lists for JSON serialization
+            if 'allowed_users' in room_data and isinstance(room_data['allowed_users'], set):
+                room_data['allowed_users'] = list(room_data['allowed_users'])
+            if 'allowed_roles' in room_data and isinstance(room_data['allowed_roles'], set):
+                room_data['allowed_roles'] = list(room_data['allowed_roles'])
+                
+            # Convert any integers to strings for Redis storage
+            if 'owner_id' in room_data and isinstance(room_data['owner_id'], int):
+                room_data['owner_id'] = str(room_data['owner_id'])
+            if 'size' in room_data and isinstance(room_data['size'], int):
+                room_data['size'] = str(room_data['size'])
             
-        return self._room_access_check(room_id, user_id, user_roles)
+            # Store room permissions
+            self.redis_manager.set(f"ws:room:{room_id}:permissions", room_data)
+            custom_log(f"Updated permissions for room {room_id}: {room_data}")
+            
+            # If session_id is provided, update session data
+            if session_id:
+                session_data = self.get_session_data(session_id)
+                if session_data:
+                    if 'rooms' not in session_data:
+                        session_data['rooms'] = set()
+                    session_data['rooms'].add(room_id)
+                    self.store_session_data(session_id, session_data)
+                    custom_log(f"Updated session {session_id} with room {room_id}")
+            
+        except Exception as e:
+            custom_log(f"Error updating room permissions: {str(e)}")
+
+    def check_room_access(self, room_id: str, user_id: str, user_roles: List[str], session_id: Optional[str] = None) -> bool:
+        """Check if user has access to room"""
+        try:
+            custom_log(f"Checking room access for user {user_id} in room {room_id}")
+            
+            # Get room permissions from Redis
+            room_permissions = self.redis_manager.get(f"ws:room:{room_id}:permissions")
+            if not room_permissions:
+                # Room doesn't exist, create it with default public permission
+                custom_log(f"Room {room_id} doesn't exist, creating with default permissions")
+                room_data = {
+                    "permission": "public",
+                    "owner_id": str(user_id),
+                    "allowed_users": [],
+                    "allowed_roles": [],
+                    "created_at": datetime.utcnow().isoformat(),
+                    "size": "0"
+                }
+                self._update_room_permissions(room_id, room_data, session_id)
+                return True
+
+            # Parse room permissions
+            permission_type = room_permissions.get("permission", "public")
+            allowed_users = set(room_permissions.get("allowed_users", []))
+            allowed_roles = set(room_permissions.get("allowed_roles", []))
+            
+            custom_log(f"Room {room_id} permission type: {permission_type}")
+            custom_log(f"Allowed users: {allowed_users}")
+            custom_log(f"Allowed roles: {allowed_roles}")
+            custom_log(f"User roles: {user_roles}")
+
+            # Check access based on permission type
+            if permission_type == "public":
+                custom_log(f"Public room access granted for user {user_id}")
+                return True
+            elif permission_type == "private":
+                has_access = user_id in allowed_users
+                custom_log(f"Private room access {'granted' if has_access else 'denied'} for user {user_id}")
+                return has_access
+            elif permission_type == "restricted":
+                has_access = (user_id in allowed_users or 
+                            any(role in allowed_roles for role in user_roles))
+                custom_log(f"Restricted room access {'granted' if has_access else 'denied'} for user {user_id}")
+                return has_access
+            elif permission_type == "owner_only":
+                has_access = user_id == room_permissions.get("owner_id")
+                custom_log(f"Owner-only room access {'granted' if has_access else 'denied'} for user {user_id}")
+                return has_access
+            else:
+                custom_log(f"Invalid permission type: {permission_type}")
+                return False
+
+        except Exception as e:
+            custom_log(f"Error checking room access: {str(e)}")
+            return False
 
     def requires_auth(self, handler: Callable) -> Callable:
         """Decorator to require authentication for WebSocket handlers."""
@@ -294,19 +491,34 @@ class WebSocketManager:
                 custom_log(f"Error in {event} handler: {str(e)}")
                 return {'status': 'error', 'message': str(e)}
 
-    def create_room(self, room_id: str):
-        """Create a new room if it doesn't exist."""
-        # Validate room ID
-        error = self.validator.validate_room_id(room_id)
-        if error:
-            custom_log(f"Invalid room ID: {error}")
-            return False
-            
-        if room_id not in self.rooms:
-            self.rooms[room_id] = set()
-            custom_log(f"Created new room: {room_id}")
+    def create_room(self, room_id: str, permission: str = "public", 
+                   owner_id: Optional[int] = None,
+                   allowed_users: Optional[Set[int]] = None,
+                   allowed_roles: Optional[Set[str]] = None) -> bool:
+        """Create a new room with specified permissions"""
+        try:
+            # Initialize room data
+            room_data = {
+                "permission": permission,
+                "owner_id": str(owner_id) if owner_id is not None else None,
+                "allowed_users": list(allowed_users) if allowed_users else [],
+                "allowed_roles": list(allowed_roles) if allowed_roles else [],
+                "created_at": datetime.utcnow().isoformat(),
+                "size": "0"
+            }
+
+            # Store room permissions
+            self._update_room_permissions(room_id, room_data)
+
+            # Initialize room size
+            self.redis_manager.set(f"ws:room:{room_id}:size", "0")
+
+            custom_log(f"Created room {room_id} with {permission} permission")
             return True
-        return False
+
+        except Exception as e:
+            custom_log(f"Error creating room: {str(e)}")
+            return False
 
     def get_room_size(self, room_id: str) -> int:
         """Get the current number of users in a room."""
@@ -443,13 +655,13 @@ class WebSocketManager:
                 session_data['user_roles'] = list(user_roles)  # Convert set to list for JSON serialization
                 
             # Check room access
-            if not self.check_room_access(room_id, session_data):
+            if not self.check_room_access(room_id, session_data['user_id'], session_data.get('user_roles', []), session_id):
                 custom_log(f"Access denied to room {room_id} for session {session_id}")
                 self.socketio.emit('error', {'message': 'Access denied to room'}, room=session_id)
                 return False
                 
             # Check current room size
-            current_size = self.redis_manager.get_room_size(room_id)
+            current_size = int(self.redis_manager.get(f"ws:room:{room_id}:size") or "0")
             if current_size >= self._room_size_limit:
                 custom_log(f"Room {room_id} has reached size limit of {self._room_size_limit}")
                 self.socketio.emit('room_full', {
@@ -460,19 +672,13 @@ class WebSocketManager:
                 return False
                 
             # Try to increment room size atomically
-            if not self.redis_manager.check_and_increment_room_size(room_id, self._room_size_limit):
-                custom_log(f"Room {room_id} has reached its size limit")
-                self.socketio.emit('room_full', {
-                    'room_id': room_id,
-                    'current_size': current_size,
-                    'max_size': self._room_size_limit
-                }, room=session_id)
-                return False
+            new_size = current_size + 1
+            self.redis_manager.set(f"ws:room:{room_id}:size", str(new_size))
                 
             # Join the room
             self.socketio.emit('room_joined', {
                 'room_id': room_id,
-                'current_size': current_size + 1,
+                'current_size': new_size,
                 'max_size': self._room_size_limit
             }, room=session_id)
             join_room(room_id, sid=session_id)  # Use the imported join_room function
@@ -492,7 +698,7 @@ class WebSocketManager:
                     'user_id': user_id,
                     'username': session_data.get('username'),
                     'roles': list(user_roles) if user_roles else [],  # Convert set to list for JSON serialization
-                    'current_size': current_size + 1,
+                    'current_size': new_size,
                     'max_size': self._room_size_limit
                 }, room=room_id)
                 
@@ -727,35 +933,30 @@ class WebSocketManager:
             custom_log(f"Error cleaning up room data for {room_id}: {str(e)}")
 
     def cleanup_session(self, session_id: str):
-        """Clean up all data associated with a session."""
+        """Clean up all session-related data."""
         try:
-            custom_log(f"Starting cleanup for session {session_id}")
-            
-            # Get session info before cleanup
+            # Get session data first
             session_data = self.get_session_data(session_id)
-            
-            # Clean up room memberships first
-            self._cleanup_room_memberships(session_id, session_data)
-            
-            # Update user presence to offline if user exists
-            if session_data and session_data.get('user_id'):
-                self.update_user_presence(session_data['user_id'], 'offline')
+            if not session_data:
+                return
                 
-            # Clean up Redis data
-            if session_data and session_data.get('user_id'):
-                self.redis_manager.delete(f"user:presence:{session_data['user_id']}")
-                self.redis_manager.delete(f"user:rate_limit:{session_data['user_id']}")
+            # Clean up session data
+            self.cleanup_session_data(session_id)
+            
+            # Clean up rate limit data
+            if session_data.get('client_id'):
+                for limit_type in self._rate_limits:
+                    key = f"ws:{limit_type}:{session_data['client_id']}"
+                    self.redis_manager.delete(key)
+                    
+            # Clean up presence data
+            if session_data.get('user_id'):
+                self.redis_manager.delete(f"ws:presence:{session_data['user_id']}")
                 
-            # Clean up session data last
-            self.redis_manager.delete(f"session:{session_id}")
-            
-            # Reset room sizes after cleanup
-            self.reset_room_sizes()
-            
-            custom_log(f"Completed cleanup for session {session_id}")
+            custom_log(f"Cleaned up all data for session {session_id}")
             
         except Exception as e:
-            custom_log(f"Error during session cleanup: {str(e)}")
+            custom_log(f"Error cleaning up session: {str(e)}")
 
     def _cleanup_room_memberships(self, session_id: str, session_data: Optional[Dict] = None):
         """Clean up room memberships for a session."""

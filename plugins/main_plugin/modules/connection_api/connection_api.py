@@ -71,7 +71,7 @@ class ConnectionAPI:
                 "keepalives_idle": Config.DB_KEEPALIVES_IDLE,
                 "keepalives_interval": Config.DB_KEEPALIVES_INTERVAL,
                 "keepalives_count": Config.DB_KEEPALIVES_COUNT,
-                "application_name": "template_three_app"
+                "application_name": "recall_app"
             }
 
             # Add SSL if enabled

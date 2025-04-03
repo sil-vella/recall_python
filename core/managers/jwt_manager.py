@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import jwt
+from jwt.exceptions import InvalidTokenError, ExpiredSignatureError, InvalidSignatureError, InvalidAudienceError, InvalidIssuerError
 from typing import Dict, Any, Optional, Union
 from tools.logger.custom_logging import custom_log
 from utils.config.config import Config
@@ -71,42 +72,71 @@ class JWTManager:
     def verify_token(self, token: str, expected_type: Optional[TokenType] = None) -> Optional[Dict[str, Any]]:
         """Verify a JWT token and return its payload if valid."""
         try:
+            # First decode the token to get its type
+            try:
+                payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            except InvalidTokenError as e:
+                custom_log(f"JWT decode failed: {str(e)}")
+                return None
+                
             # Check if token is revoked
             if self._is_token_revoked(token):
                 custom_log(f"Token revoked: {token[:10]}...")
                 return None
                 
-            payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
-            
             # Verify token type if specified
-            if expected_type and payload.get("type") != expected_type.value:
-                custom_log(f"Invalid token type. Expected: {expected_type.value}, Got: {payload.get('type')}")
-                return None
+            if expected_type:
+                token_type = payload.get("type")
+                if not token_type:
+                    custom_log("Token type missing in payload")
+                    return None
+                    
+                if token_type != expected_type.value:
+                    custom_log(f"Invalid token type. Expected: {expected_type.value}, Got: {token_type}")
+                    return None
             
-            # Verify client fingerprint if present
-            if "fingerprint" in payload:
+            # Verify client fingerprint if present and if it's a WebSocket token
+            if expected_type == TokenType.WEBSOCKET and "fingerprint" in payload:
                 current_fingerprint = self._get_client_fingerprint()
                 if current_fingerprint and payload["fingerprint"] != current_fingerprint:
                     custom_log("Token bound to different client")
                     return None
                 
             return payload
-        except jwt.ExpiredSignatureError:
+            
+        except ExpiredSignatureError:
             custom_log("Token has expired")
             return None
-        except jwt.JWTError as e:
-            custom_log(f"JWT verification failed: {str(e)}")
+        except InvalidSignatureError:
+            custom_log("Invalid token signature")
+            return None
+        except InvalidAudienceError:
+            custom_log("Invalid token audience")
+            return None
+        except InvalidIssuerError:
+            custom_log("Invalid token issuer")
+            return None
+        except Exception as e:
+            custom_log(f"Token verification failed: {str(e)}")
             return None
 
     def revoke_token(self, token: str) -> bool:
         """Revoke a token by removing it from Redis."""
         try:
-            # Remove from all token types
-            for token_type in TokenType:
-                key = f"token:{token_type.value}:{token}"
-                self.redis_manager.delete(key)
-            custom_log(f"Token revoked: {token[:10]}...")
-            return True
+            # First decode the token to get its type
+            try:
+                payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+                token_type = payload.get("type")
+                if not token_type:
+                    custom_log("Token type missing in payload")
+                    return False
+            except InvalidTokenError:
+                custom_log("Invalid token format")
+                return False
+                
+            # Revoke token using Redis manager's token methods
+            return self.redis_manager.revoke_token(token_type, token)
+            
         except Exception as e:
             custom_log(f"Error revoking token: {str(e)}")
             return False
@@ -124,38 +154,52 @@ class JWTManager:
     def _store_token(self, token: str, expire: datetime, token_type: TokenType):
         """Store token in Redis with proper prefix and expiration."""
         try:
-            # Use a prefix for faster revocation checks
-            key = f"token:{token_type.value}:{token}"
-            ttl = int((expire - datetime.utcnow()).total_seconds())
+            # Calculate TTL in seconds, ensuring it's not negative
+            ttl = max(1, int((expire - datetime.utcnow()).total_seconds()))
             
-            if ttl > 0:
-                # Store token with its TTL
-                self.redis_manager.set(key, "1", expire=ttl)
-                custom_log(f"Stored {token_type.value} token with TTL {ttl}s")
-            else:
-                custom_log(f"Token already expired, not storing: {token[:10]}...")
+            # Store token using Redis manager's token methods
+            if not self.redis_manager.store_token(token_type.value, token, expire=ttl):
+                custom_log(f"Failed to store {token_type.value} token")
             
         except Exception as e:
             custom_log(f"Error storing token: {str(e)}")
+            # Don't raise the exception, just log it
+            # This allows the token to still be used even if Redis storage fails
 
     def _is_token_revoked(self, token: str) -> bool:
         """Check if a token is revoked using prefix-based lookup."""
         try:
-            # Check all token types since we don't know which type it is
-            for token_type in TokenType:
-                key = f"token:{token_type.value}:{token}"
-                if self.redis_manager.exists(key):
-                    return False  # Token exists in Redis, so it's not revoked
-            return True  # Token not found in any type, so it's revoked
+            # First decode the token to get its type
+            try:
+                payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+                token_type = payload.get("type")
+                if not token_type:
+                    custom_log("Token type missing in payload")
+                    return True
+            except InvalidTokenError:
+                # If we can't decode the token, consider it revoked
+                return True
+                
+            # Check if token is valid in Redis
+            return not self.redis_manager.is_token_valid(token_type, token)
+            
         except Exception as e:
             custom_log(f"Error checking token revocation: {str(e)}")
             return True  # Fail safe: consider token revoked on error
 
     def cleanup_expired_tokens(self):
         """Clean up expired tokens from Redis."""
-        # This can be called periodically to clean up expired tokens
-        # Implementation depends on your Redis key pattern
-        pass
+        try:
+            custom_log("Starting expired token cleanup")
+            
+            for token_type in TokenType:
+                if not self.redis_manager.cleanup_expired_tokens(token_type.value):
+                    custom_log(f"Failed to cleanup expired {token_type.value} tokens")
+                    
+            custom_log("Completed expired token cleanup")
+            
+        except Exception as e:
+            custom_log(f"Error during token cleanup: {str(e)}")
 
     # Convenience methods for specific use cases
     def create_access_token(self, data: Dict[str, Any], expires_in: Optional[int] = None) -> str:
