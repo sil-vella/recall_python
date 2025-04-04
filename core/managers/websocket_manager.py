@@ -346,32 +346,34 @@ class WebSocketManager:
                         custom_log(f"Marking user {session_data['user_id']} as online")
                         self.update_user_presence(session_data['user_id'], 'online')
                     
-                    # Get the client-safe version of the data
-                    client_data = self.get_client_session_data(session_id)
-                    if not client_data:
-                        # Create a copy for client transmission and ensure it's serializable
-                        client_data = {}
-                        for key, value in session_data.items():
-                            if isinstance(value, (set, datetime)):
-                                client_data[key] = str(value)
-                            elif isinstance(value, (int, float)):
-                                client_data[key] = str(value)
-                            elif isinstance(value, list):
-                                client_data[key] = [
-                                    list(item) if isinstance(item, set) else 
-                                    str(item) if isinstance(item, (datetime, int, float)) else 
-                                    item 
-                                    for item in value
-                                ]
-                            elif isinstance(value, dict):
-                                client_data[key] = {
-                                    k: (list(v) if isinstance(v, set) else 
-                                        str(v) if isinstance(v, (datetime, int, float)) else 
-                                        v)
-                                    for k, v in value.items()
-                                }
-                            else:
-                                client_data[key] = value
+                    # Create a client-safe version of the data
+                    client_data = {}
+                    for key, value in session_data.items():
+                        if key == '_client_data':  # Skip the _client_data field itself
+                            continue
+                        if isinstance(value, (set, datetime)):
+                            client_data[key] = str(value)
+                        elif isinstance(value, (int, float)):
+                            client_data[key] = str(value)
+                        elif isinstance(value, list):
+                            client_data[key] = [
+                                list(item) if isinstance(item, set) else 
+                                str(item) if isinstance(item, (datetime, int, float)) else 
+                                item 
+                                for item in value
+                            ]
+                        elif isinstance(value, dict):
+                            client_data[key] = {
+                                k: (list(v) if isinstance(v, set) else 
+                                    str(v) if isinstance(v, (datetime, int, float)) else 
+                                    v)
+                                for k, v in value.items()
+                            }
+                        else:
+                            client_data[key] = value
+                    
+                    # Store the client-safe version in the session data
+                    session_data['_client_data'] = client_data
                     
                     # Verify JSON serialization before emitting
                     try:
