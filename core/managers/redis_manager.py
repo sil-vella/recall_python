@@ -11,6 +11,7 @@ import base64
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from datetime import datetime
 
 class RedisManager:
     _instance = None
@@ -104,17 +105,75 @@ class RedisManager:
 
     def _encrypt_data(self, data):
         """Encrypt data before storing in Redis."""
-        if isinstance(data, (dict, list)):
-            data = json.dumps(data)
-        return self.cipher_suite.encrypt(data.encode()).decode()
+        try:
+            # Handle direct set values
+            if isinstance(data, set):
+                data = list(data)
+            
+            # Convert any sets to lists for JSON serialization
+            if isinstance(data, dict):
+                data = self._convert_sets_to_lists(data)
+            elif isinstance(data, list):
+                data = [self._convert_sets_to_lists(item) if isinstance(item, dict) else 
+                       (list(item) if isinstance(item, set) else item) for item in data]
+            
+            # Convert to JSON string
+            if isinstance(data, (dict, list)):
+                data = json.dumps(data)
+            
+            # Encrypt the data
+            return self.cipher_suite.encrypt(data.encode()).decode()
+        except Exception as e:
+            custom_log(f"Error encrypting data: {str(e)}")
+            raise
+
+    def _convert_sets_to_lists(self, data):
+        """Convert any sets in a dictionary to lists for JSON serialization."""
+        result = {}
+        for key, value in data.items():
+            if isinstance(value, set):
+                result[key] = list(value)
+            elif isinstance(value, dict):
+                result[key] = self._convert_sets_to_lists(value)
+            elif isinstance(value, list):
+                result[key] = [self._convert_sets_to_lists(item) if isinstance(item, dict) else 
+                              (list(item) if isinstance(item, set) else item) for item in value]
+            elif isinstance(value, (datetime, int, float)):
+                result[key] = str(value)
+            else:
+                result[key] = value
+        return result
 
     def _decrypt_data(self, encrypted_data):
         """Decrypt data retrieved from Redis."""
         try:
             decrypted = self.cipher_suite.decrypt(encrypted_data.encode())
-            return json.loads(decrypted.decode())
-        except:
+            data = json.loads(decrypted.decode())
+            
+            # Convert lists back to sets for specific fields
+            if isinstance(data, dict):
+                data = self._convert_lists_to_sets(data)
+            elif isinstance(data, list):
+                data = [self._convert_lists_to_sets(item) if isinstance(item, dict) else item for item in data]
+                
+            return data
+        except Exception as e:
+            custom_log(f"Error decrypting data: {str(e)}")
             return None
+
+    def _convert_lists_to_sets(self, data):
+        """Convert lists back to sets for specific fields when retrieving data."""
+        result = {}
+        for key, value in data.items():
+            if key in ['rooms', 'user_roles', 'allowed_users', 'allowed_roles'] and isinstance(value, list):
+                result[key] = set(value)
+            elif isinstance(value, dict):
+                result[key] = self._convert_lists_to_sets(value)
+            elif isinstance(value, list):
+                result[key] = [self._convert_lists_to_sets(item) if isinstance(item, dict) else item for item in value]
+            else:
+                result[key] = value
+        return result
 
     def get(self, key, *args):
         """Get value from Redis with secure key generation."""

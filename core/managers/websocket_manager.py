@@ -81,45 +81,163 @@ class WebSocketManager:
     def store_session_data(self, session_id: str, session_data: Dict[str, Any]):
         """Store session data in Redis."""
         try:
-            # Convert any sets to lists for JSON serialization
+            # Log the incoming data
+            custom_log(f"DEBUG - Incoming session data before processing: {session_data}")
+            
+            # Create a deep copy for storage
             data_to_store = session_data.copy()
-            if 'rooms' in data_to_store and isinstance(data_to_store['rooms'], set):
-                data_to_store['rooms'] = list(data_to_store['rooms'])
-            if 'user_roles' in data_to_store and isinstance(data_to_store['user_roles'], set):
-                data_to_store['user_roles'] = list(data_to_store['user_roles'])
+            
+            # Convert any sets to lists for JSON serialization
+            if 'rooms' in data_to_store:
+                if isinstance(data_to_store['rooms'], set):
+                    data_to_store['rooms'] = list(data_to_store['rooms'])
+                    custom_log(f"DEBUG - Converted rooms from set to list: {data_to_store['rooms']}")
+                elif not isinstance(data_to_store['rooms'], list):
+                    data_to_store['rooms'] = []
+                    custom_log("DEBUG - Initialized rooms as empty list")
+            
+            if 'user_roles' in data_to_store:
+                if isinstance(data_to_store['user_roles'], set):
+                    data_to_store['user_roles'] = list(data_to_store['user_roles'])
+                    custom_log(f"DEBUG - Converted user_roles from set to list: {data_to_store['user_roles']}")
+                elif not isinstance(data_to_store['user_roles'], list):
+                    data_to_store['user_roles'] = []
+                    custom_log("DEBUG - Initialized user_roles as empty list")
             
             # Convert any integers to strings
             if 'user_id' in data_to_store and isinstance(data_to_store['user_id'], int):
                 data_to_store['user_id'] = str(data_to_store['user_id'])
+                custom_log(f"DEBUG - Converted user_id to string: {data_to_store['user_id']}")
+            
+            # Handle any nested structures
+            for key, value in data_to_store.items():
+                if isinstance(value, (set, datetime)):
+                    data_to_store[key] = str(value)
+                    custom_log(f"DEBUG - Converted {key} from {type(value)} to string: {data_to_store[key]}")
+                elif isinstance(value, (int, float)):
+                    data_to_store[key] = str(value)
+                    custom_log(f"DEBUG - Converted {key} from {type(value)} to string: {data_to_store[key]}")
+                elif isinstance(value, list):
+                    # Convert any sets within lists to lists
+                    data_to_store[key] = [
+                        list(item) if isinstance(item, set) else 
+                        str(item) if isinstance(item, (datetime, int, float)) else 
+                        item 
+                        for item in value
+                    ]
+                    custom_log(f"DEBUG - Processed list in {key}: {data_to_store[key]}")
+                elif isinstance(value, dict):
+                    # Handle nested dictionaries
+                    data_to_store[key] = {
+                        k: (list(v) if isinstance(v, set) else 
+                            str(v) if isinstance(v, (datetime, int, float)) else 
+                            v)
+                        for k, v in value.items()
+                    }
+                    custom_log(f"DEBUG - Processed dict in {key}: {data_to_store[key]}")
+            
+            # Verify JSON serialization before storing
+            try:
+                import json
+                json.dumps(data_to_store)
+                custom_log("DEBUG - Successfully verified JSON serialization")
+            except Exception as e:
+                custom_log(f"DEBUG - JSON serialization verification failed: {str(e)}")
+                # Try to identify the problematic key
+                for key, value in data_to_store.items():
+                    try:
+                        json.dumps({key: value})
+                    except Exception as e2:
+                        custom_log(f"DEBUG - Problem with key '{key}': {str(e2)}")
+                        # Convert problematic value to string as last resort
+                        data_to_store[key] = str(value)
+                        custom_log(f"DEBUG - Converted problematic value to string: {data_to_store[key]}")
             
             # Store in Redis with expiration
             self.redis_manager.set(f"ws:session:{session_id}", data_to_store, expire=Config.WS_SESSION_TTL)
-            custom_log(f"Stored session data for {session_id}")
+            custom_log(f"DEBUG - Final data stored for session {session_id}: {data_to_store}")
+            
         except Exception as e:
             custom_log(f"Error storing session data: {str(e)}")
+            # Re-raise the exception to be handled by the caller
+            raise
 
     def get_session_data(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session data from Redis."""
         try:
             data = self.redis_manager.get(f"ws:session:{session_id}")
             if data:
+                # Create a deep copy to avoid modifying the original data
+                data_copy = data.copy()
+                
                 # Convert lists back to sets for internal use
-                if 'rooms' in data:
-                    data['rooms'] = set(data['rooms'])
-                if 'user_roles' in data:
-                    data['user_roles'] = set(data['user_roles'])
-                    
+                if 'rooms' in data_copy:
+                    data_copy['rooms'] = set(data_copy['rooms'])
+                if 'user_roles' in data_copy:
+                    data_copy['user_roles'] = set(data_copy['user_roles'])
+                
+                # Handle any nested sets in the data
+                for key, value in data_copy.items():
+                    if isinstance(value, list):
+                        # Check if this list should be a set
+                        if key in ['rooms', 'user_roles']:
+                            data_copy[key] = set(value)
+                        else:
+                            # Check for nested sets in the list
+                            data_copy[key] = [
+                                set(item) if isinstance(item, list) and key in ['rooms', 'user_roles'] else
+                                item
+                                for item in value
+                            ]
+                    elif isinstance(value, dict):
+                        # Handle nested dictionaries
+                        for k, v in value.items():
+                            if isinstance(v, list) and k in ['rooms', 'user_roles']:
+                                value[k] = set(v)
+                            elif isinstance(v, list):
+                                # Check for nested sets in the list
+                                value[k] = [
+                                    set(item) if isinstance(item, list) and k in ['rooms', 'user_roles'] else
+                                    item
+                                    for item in v
+                                ]
+                
                 # Create a copy for client use with lists instead of sets
-                client_data = data.copy()
+                client_data = data_copy.copy()
+                
+                # Convert sets to lists for client use
                 if 'rooms' in client_data and isinstance(client_data['rooms'], set):
                     client_data['rooms'] = list(client_data['rooms'])
                 if 'user_roles' in client_data and isinstance(client_data['user_roles'], set):
                     client_data['user_roles'] = list(client_data['user_roles'])
-                    
-                # Store the client-safe version in the data
-                data['_client_data'] = client_data
                 
-            return data
+                # Handle any nested sets in the client data
+                for key, value in client_data.items():
+                    if isinstance(value, list):
+                        # Check for nested sets in the list
+                        client_data[key] = [
+                            list(item) if isinstance(item, set) else
+                            item
+                            for item in value
+                        ]
+                    elif isinstance(value, dict):
+                        # Handle nested dictionaries
+                        for k, v in value.items():
+                            if isinstance(v, set):
+                                value[k] = list(v)
+                            elif isinstance(v, list):
+                                # Check for nested sets in the list
+                                value[k] = [
+                                    list(item) if isinstance(item, set) else
+                                    item
+                                    for item in v
+                                ]
+                
+                # Store the client-safe version in the data
+                data_copy['_client_data'] = client_data
+                
+                return data_copy
+            return None
         except Exception as e:
             custom_log(f"Error getting session data: {str(e)}")
             return None
@@ -191,10 +309,10 @@ class WebSocketManager:
                         return False
                         
                     custom_log(f"Token verified for session {session_id}, payload: {payload}")
-                    
+                        
                     # Store session data
                     session_data = {
-                        'user_id': payload.get('id'),
+                        'user_id': str(payload.get('id')),  # Convert to string immediately
                         'username': payload.get('username'),
                         'token': token,
                         'token_type': payload.get('type'),
@@ -214,14 +332,8 @@ class WebSocketManager:
                     else:
                         session_data['user_roles'] = []
                     
-                    # Ensure all data is JSON serializable
-                    for key, value in session_data.items():
-                        if isinstance(value, (set, datetime)):
-                            session_data[key] = str(value)
-                        elif isinstance(value, (int, float)):
-                            session_data[key] = str(value)
-                    
-                    custom_log(f"Storing session data for {session_id}: {session_data}")
+                    # Log the session data before storage
+                    custom_log(f"DEBUG - Session data before storage: {session_data}")
                     
                     # Store session data in Redis with expiration
                     self.store_session_data(session_id, session_data)
@@ -234,9 +346,48 @@ class WebSocketManager:
                         custom_log(f"Marking user {session_data['user_id']} as online")
                         self.update_user_presence(session_data['user_id'], 'online')
                     
+                    # Get the client-safe version of the data
+                    client_data = self.get_client_session_data(session_id)
+                    if not client_data:
+                        # Create a copy for client transmission and ensure it's serializable
+                        client_data = {}
+                        for key, value in session_data.items():
+                            if isinstance(value, (set, datetime)):
+                                client_data[key] = str(value)
+                            elif isinstance(value, (int, float)):
+                                client_data[key] = str(value)
+                            elif isinstance(value, list):
+                                client_data[key] = [
+                                    list(item) if isinstance(item, set) else 
+                                    str(item) if isinstance(item, (datetime, int, float)) else 
+                                    item 
+                                    for item in value
+                                ]
+                            elif isinstance(value, dict):
+                                client_data[key] = {
+                                    k: (list(v) if isinstance(v, set) else 
+                                        str(v) if isinstance(v, (datetime, int, float)) else 
+                                        v)
+                                    for k, v in value.items()
+                                }
+                            else:
+                                client_data[key] = value
+                    
+                    # Verify JSON serialization before emitting
+                    try:
+                        import json
+                        json.dumps(client_data)
+                        custom_log("DEBUG - Successfully verified client data JSON serialization")
+                    except Exception as e:
+                        custom_log(f"DEBUG - Client data JSON serialization failed: {str(e)}")
+                        # If serialization still fails, convert all non-string values to strings
+                        for key, value in client_data.items():
+                            if not isinstance(value, str):
+                                client_data[key] = str(value)
+                    
                     # Send session data to client
-                    custom_log(f"Sending session data to client {session_id}: {session_data}")
-                    self.socketio.emit('session_data', session_data, room=session_id)
+                    custom_log(f"DEBUG - Sending session data to client {session_id}: {client_data}")
+                    self.socketio.emit('session_data', client_data, room=session_id)
                     
                     custom_log(f"WebSocket connection established for session {session_id}")
                     return True
@@ -368,10 +519,24 @@ class WebSocketManager:
             if session_id:
                 session_data = self.get_session_data(session_id)
                 if session_data:
+                    # Ensure rooms is a set for internal use
                     if 'rooms' not in session_data:
                         session_data['rooms'] = set()
+                    elif not isinstance(session_data['rooms'], set):
+                        session_data['rooms'] = set(session_data['rooms'])
+                    
+                    # Add the room to the set
                     session_data['rooms'].add(room_id)
-                    self.store_session_data(session_id, session_data)
+                    
+                    # Create a copy for Redis storage with lists instead of sets
+                    data_to_store = session_data.copy()
+                    if 'rooms' in data_to_store and isinstance(data_to_store['rooms'], set):
+                        data_to_store['rooms'] = list(data_to_store['rooms'])
+                    if 'user_roles' in data_to_store and isinstance(data_to_store['user_roles'], set):
+                        data_to_store['user_roles'] = list(data_to_store['user_roles'])
+                    
+                    # Store the serializable version in Redis
+                    self.redis_manager.set(f"ws:session:{session_id}", data_to_store, expire=Config.WS_SESSION_TTL)
                     custom_log(f"Updated session {session_id} with room {room_id}")
             
         except Exception as e:
@@ -427,8 +592,8 @@ class WebSocketManager:
                 return has_access
             else:
                 custom_log(f"Invalid permission type: {permission_type}")
-                return False
-
+            return False
+            
         except Exception as e:
             custom_log(f"Error checking room access: {str(e)}")
             return False
@@ -514,7 +679,94 @@ class WebSocketManager:
                 if event in ['connect', 'disconnect']:
                     # For connect event, ensure we're not passing any data that might contain sets
                     if event == 'connect':
-                        return handler()
+                        # Get session data for connect event
+                        session_id = request.sid
+                        session_data = self.get_session_data(session_id)
+                        
+                        # Log the entire session data structure for debugging
+                        custom_log(f"DEBUG - Raw session data before serialization: {session_data}")
+                        if session_data:
+                            for key, value in session_data.items():
+                                custom_log(f"DEBUG - Key: {key}, Type: {type(value)}, Value: {value}")
+                                if isinstance(value, dict):
+                                    for k, v in value.items():
+                                        custom_log(f"DEBUG - Nested key: {k}, Type: {type(v)}, Value: {v}")
+                                elif isinstance(value, list):
+                                    for i, item in enumerate(value):
+                                        custom_log(f"DEBUG - List item {i}, Type: {type(item)}, Value: {item}")
+                        
+                        # Use the client-safe version of the session data
+                        if session_data and '_client_data' in session_data:
+                            serializable_data = session_data['_client_data']
+                            custom_log(f"DEBUG - Using _client_data for serialization: {serializable_data}")
+                        else:
+                            # Create a copy for serialization
+                            serializable_data = session_data.copy() if session_data else {}
+                            custom_log(f"DEBUG - Created copy for serialization: {serializable_data}")
+                            
+                            # Handle rooms field
+                            if 'rooms' in serializable_data:
+                                if isinstance(serializable_data['rooms'], set):
+                                    serializable_data['rooms'] = list(serializable_data['rooms'])
+                                    custom_log(f"DEBUG - Converted rooms from set to list: {serializable_data['rooms']}")
+                                elif not isinstance(serializable_data['rooms'], list):
+                                    serializable_data['rooms'] = []
+                                    custom_log("DEBUG - Initialized rooms as empty list")
+                            
+                            # Handle user_roles field
+                            if 'user_roles' in serializable_data:
+                                if isinstance(serializable_data['user_roles'], set):
+                                    serializable_data['user_roles'] = list(serializable_data['user_roles'])
+                                    custom_log(f"DEBUG - Converted user_roles from set to list: {serializable_data['user_roles']}")
+                                elif not isinstance(serializable_data['user_roles'], list):
+                                    serializable_data['user_roles'] = []
+                                    custom_log("DEBUG - Initialized user_roles as empty list")
+                            
+                            # Ensure all data is JSON serializable
+                            for key, value in serializable_data.items():
+                                if isinstance(value, (set, datetime)):
+                                    serializable_data[key] = str(value)
+                                    custom_log(f"DEBUG - Converted {key} from {type(value)} to string: {serializable_data[key]}")
+                                elif isinstance(value, (int, float)):
+                                    serializable_data[key] = str(value)
+                                    custom_log(f"DEBUG - Converted {key} from {type(value)} to string: {serializable_data[key]}")
+                                elif isinstance(value, list):
+                                    # Convert any sets within lists to lists
+                                    serializable_data[key] = [
+                                        list(item) if isinstance(item, set) else 
+                                        str(item) if isinstance(item, (datetime, int, float)) else 
+                                        item 
+                                        for item in value
+                                    ]
+                                    custom_log(f"DEBUG - Processed list in {key}: {serializable_data[key]}")
+                                elif isinstance(value, dict):
+                                    # Handle nested dictionaries
+                                    serializable_data[key] = {
+                                        k: (list(v) if isinstance(v, set) else 
+                                            str(v) if isinstance(v, (datetime, int, float)) else 
+                                            v)
+                                        for k, v in value.items()
+                                    }
+                                    custom_log(f"DEBUG - Processed dict in {key}: {serializable_data[key]}")
+                        
+                        # Log the final serializable data
+                        custom_log(f"DEBUG - Final serializable data: {serializable_data}")
+                        
+                        # Try to serialize the data to JSON to catch any remaining issues
+                        try:
+                            import json
+                            json.dumps(serializable_data)
+                            custom_log("DEBUG - Successfully serialized data to JSON")
+                        except Exception as e:
+                            custom_log(f"DEBUG - JSON serialization error: {str(e)}")
+                            # Try to identify the problematic key
+                            for key, value in serializable_data.items():
+                                try:
+                                    json.dumps({key: value})
+                                except Exception as e2:
+                                    custom_log(f"DEBUG - Problem with key '{key}': {str(e2)}")
+                        
+                        return handler(data, serializable_data)
                     return handler(data)
                     
                 # Ensure data is a dictionary if None is provided
@@ -528,11 +780,88 @@ class WebSocketManager:
                     custom_log(f"No session data found for {session_id}")
                     return {'status': 'error', 'message': 'Session not found'}
                     
-                # Convert any sets in session data to lists
-                if 'rooms' in session_data and isinstance(session_data['rooms'], set):
-                    session_data['rooms'] = list(session_data['rooms'])
-                if 'user_roles' in session_data and isinstance(session_data['user_roles'], set):
-                    session_data['user_roles'] = list(session_data['user_roles'])
+                # Log the entire session data structure for debugging
+                custom_log(f"DEBUG - Raw session data before serialization: {session_data}")
+                if session_data:
+                    for key, value in session_data.items():
+                        custom_log(f"DEBUG - Key: {key}, Type: {type(value)}, Value: {value}")
+                        if isinstance(value, dict):
+                            for k, v in value.items():
+                                custom_log(f"DEBUG - Nested key: {k}, Type: {type(v)}, Value: {v}")
+                        elif isinstance(value, list):
+                            for i, item in enumerate(value):
+                                custom_log(f"DEBUG - List item {i}, Type: {type(item)}, Value: {item}")
+                
+                # Use the client-safe version of the session data
+                if '_client_data' in session_data:
+                    serializable_data = session_data['_client_data']
+                    custom_log(f"DEBUG - Using _client_data for serialization: {serializable_data}")
+                else:
+                    # Create a copy for serialization
+                    serializable_data = session_data.copy()
+                    custom_log(f"DEBUG - Created copy for serialization: {serializable_data}")
+                    
+                    # Handle rooms field
+                    if 'rooms' in serializable_data:
+                        if isinstance(serializable_data['rooms'], set):
+                            serializable_data['rooms'] = list(serializable_data['rooms'])
+                            custom_log(f"DEBUG - Converted rooms from set to list: {serializable_data['rooms']}")
+                        elif not isinstance(serializable_data['rooms'], list):
+                            serializable_data['rooms'] = []
+                            custom_log("DEBUG - Initialized rooms as empty list")
+                    
+                    # Handle user_roles field
+                    if 'user_roles' in serializable_data:
+                        if isinstance(serializable_data['user_roles'], set):
+                            serializable_data['user_roles'] = list(serializable_data['user_roles'])
+                            custom_log(f"DEBUG - Converted user_roles from set to list: {serializable_data['user_roles']}")
+                        elif not isinstance(serializable_data['user_roles'], list):
+                            serializable_data['user_roles'] = []
+                            custom_log("DEBUG - Initialized user_roles as empty list")
+                    
+                    # Ensure all data is JSON serializable
+                    for key, value in serializable_data.items():
+                        if isinstance(value, (set, datetime)):
+                            serializable_data[key] = str(value)
+                            custom_log(f"DEBUG - Converted {key} from {type(value)} to string: {serializable_data[key]}")
+                        elif isinstance(value, (int, float)):
+                            serializable_data[key] = str(value)
+                            custom_log(f"DEBUG - Converted {key} from {type(value)} to string: {serializable_data[key]}")
+                        elif isinstance(value, list):
+                            # Convert any sets within lists to lists
+                            serializable_data[key] = [
+                                list(item) if isinstance(item, set) else 
+                                str(item) if isinstance(item, (datetime, int, float)) else 
+                                item 
+                                for item in value
+                            ]
+                            custom_log(f"DEBUG - Processed list in {key}: {serializable_data[key]}")
+                        elif isinstance(value, dict):
+                            # Handle nested dictionaries
+                            serializable_data[key] = {
+                                k: (list(v) if isinstance(v, set) else 
+                                    str(v) if isinstance(v, (datetime, int, float)) else 
+                                    v)
+                                for k, v in value.items()
+                            }
+                            custom_log(f"DEBUG - Processed dict in {key}: {serializable_data[key]}")
+                
+                # Log the final serializable data
+                custom_log(f"DEBUG - Final serializable data: {serializable_data}")
+                
+                # Try to serialize the data to JSON to catch any remaining issues
+                try:
+                    import json
+                    json.dumps(serializable_data)
+                    custom_log("DEBUG - Successfully serialized data to JSON")
+                except Exception as e:
+                    custom_log(f"DEBUG - JSON serialization error: {str(e)}")
+                    # Try to identify the problematic key
+                    for key, value in serializable_data.items():
+                        try:
+                            json.dumps({key: value})
+                        except Exception as e2:
+                            custom_log(f"DEBUG - Problem with key '{key}': {str(e2)}")
                     
                 # Validate event payload
                 error = self.validator.validate_event_payload(event, data)
@@ -553,17 +882,33 @@ class WebSocketManager:
                     return {'status': 'error', 'message': str(error)}
                     
                 # Ensure data is JSON serializable
-                serializable_data = {}
+                serializable_event_data = {}
                 for key, value in data.items():
                     if isinstance(value, (set, datetime)):
-                        serializable_data[key] = str(value)
+                        serializable_event_data[key] = str(value)
                     elif isinstance(value, (int, float)):
-                        serializable_data[key] = str(value)
+                        serializable_event_data[key] = str(value)
+                    elif isinstance(value, list):
+                        # Convert any sets within lists to lists
+                        serializable_event_data[key] = [
+                            list(item) if isinstance(item, set) else 
+                            str(item) if isinstance(item, (datetime, int, float)) else 
+                            item 
+                            for item in value
+                        ]
+                    elif isinstance(value, dict):
+                        # Handle nested dictionaries
+                        serializable_event_data[key] = {
+                            k: (list(v) if isinstance(v, set) else 
+                                str(v) if isinstance(v, (datetime, int, float)) else 
+                                v)
+                            for k, v in value.items()
+                        }
                     else:
-                        serializable_data[key] = value
+                        serializable_event_data[key] = value
                         
                 # Call handler with both data and session_data
-                return handler(serializable_data, session_data)
+                return handler(serializable_event_data, serializable_data)
             except Exception as e:
                 custom_log(f"Error in {event} handler: {str(e)}")
                 return {'status': 'error', 'message': str(e)}
@@ -595,7 +940,7 @@ class WebSocketManager:
 
         except Exception as e:
             custom_log(f"Error creating room: {str(e)}")
-            return False
+        return False
 
     def get_room_size(self, room_id: str) -> int:
         """Get the current number of users in a room."""
@@ -768,6 +1113,25 @@ class WebSocketManager:
             if session_id not in self.session_rooms:
                 self.session_rooms[session_id] = set()
             self.session_rooms[session_id].add(room_id)
+            
+            # Ensure rooms is a set for internal use
+            if 'rooms' not in session_data:
+                session_data['rooms'] = set()
+            elif not isinstance(session_data['rooms'], set):
+                session_data['rooms'] = set(session_data['rooms'])
+            
+            # Add the room to the set
+            session_data['rooms'].add(room_id)
+            
+            # Create a copy for Redis storage with lists instead of sets
+            data_to_store = session_data.copy()
+            if 'rooms' in data_to_store and isinstance(data_to_store['rooms'], set):
+                data_to_store['rooms'] = list(data_to_store['rooms'])
+            if 'user_roles' in data_to_store and isinstance(data_to_store['user_roles'], set):
+                data_to_store['user_roles'] = list(data_to_store['user_roles'])
+            
+            # Store the serializable version in Redis
+            self.redis_manager.set(f"ws:session:{session_id}", data_to_store, expire=Config.WS_SESSION_TTL)
             
             # Broadcast user joined event if user_id is present
             if user_id:

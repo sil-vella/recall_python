@@ -513,23 +513,37 @@ class ConnectionAPI:
     def create_user_tokens(self, user_data):
         """Create access and refresh tokens for a user."""
         try:
+            # Ensure user_data is JSON serializable
+            serializable_data = {}
+            for key, value in user_data.items():
+                if key == 'id':  # Preserve integer type for ID
+                    serializable_data[key] = int(value) if isinstance(value, str) else value
+                elif isinstance(value, (set, datetime)):
+                    serializable_data[key] = str(value)
+                elif isinstance(value, (int, float)) and key != 'id':  # Don't convert ID to string
+                    serializable_data[key] = str(value)
+                elif isinstance(value, list):
+                    serializable_data[key] = [str(item) if isinstance(item, (set, datetime)) else item for item in value]
+                else:
+                    serializable_data[key] = value
+            
             # Create access token
             access_token = self.jwt_manager.create_token(
-                user_data,
+                serializable_data,
                 token_type=TokenType.ACCESS,
                 expires_in=3600  # 1 hour
             )
             
             # Create refresh token
             refresh_token = self.jwt_manager.create_token(
-                user_data,
+                serializable_data,
                 token_type=TokenType.REFRESH,
                 expires_in=604800  # 7 days
             )
             
             # Store tokens in Redis
             self.redis_manager.set(
-                f"user_tokens:{user_data['id']}",  # Changed from user_id to id
+                f"user_tokens:{serializable_data['id']}",  # Using the preserved integer ID
                 {
                     "access_token": access_token,
                     "refresh_token": refresh_token,
