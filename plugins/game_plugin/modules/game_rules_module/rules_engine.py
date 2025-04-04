@@ -3,7 +3,7 @@ from datetime import datetime
 from ..game_state_module.state_manager import StateManager
 from ..game_state_module.models.game_session import GameSession
 from ..game_state_module.models.player_state import PlayerState
-from ..game_cards_module import CardManager
+from ..game_cards_module.card_manager import CardManager
 
 class GameRulesEngine:
     """Handles game rules and logic for the Dutch card game."""

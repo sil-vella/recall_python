@@ -7,6 +7,7 @@ from plugins.game_plugin.modules.game_events_module.event_handlers import GameEv
 from plugins.game_plugin.modules.game_events_module.event_validators import GameEventValidators
 from plugins.game_plugin.modules.game_rules_module.rules_engine import GameRulesEngine
 from plugins.game_plugin.modules.game_rules_module.action_validator import GameActionValidator
+from plugins.game_plugin.modules.game_cards_module.card_manager import CardManager
 
 
 class GamePlugin:
@@ -35,6 +36,12 @@ class GamePlugin:
                 "game_state_module",
                 StateManager,
                 redis_manager=app_manager.websocket_manager.redis_manager
+            )
+            
+            # Register card manager module
+            app_manager.module_manager.register_module(
+                "game_cards_module",
+                CardManager
             )
             
             # Register rules engine module

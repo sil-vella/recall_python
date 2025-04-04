@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from .player_state import PlayerState
 from .game_board import GameBoard
-from ..game_cards_module import CardManager, Card
+from ...game_cards_module.card_manager import CardManager, Card
 
 @dataclass
 class GameSession:
