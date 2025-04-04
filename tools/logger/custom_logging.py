@@ -84,7 +84,28 @@ def sanitize_log_message(message):
 def custom_log(message):
     if CUSTOM_LOGGING_ENABLED:
         message = sanitize_log_message(message)
-        custom_logger.debug(message)
+        # Get the frame of the caller
+        frame = inspect.currentframe()
+        try:
+            # Go up one frame to get the caller's frame
+            caller_frame = frame.f_back
+            if caller_frame:
+                # Get the caller's file and line number
+                filename = caller_frame.f_code.co_filename
+                line_number = caller_frame.f_lineno
+                # Create a new record with the caller's info
+                record = logging.LogRecord(
+                    name='custom_log',
+                    level=logging.DEBUG,
+                    pathname=filename,
+                    lineno=line_number,
+                    msg=message,
+                    args=(),
+                    exc_info=None
+                )
+                custom_logger.handle(record)
+        finally:
+            del frame  # Clean up the frame reference
 
 
 def game_play_log(message, action=None):

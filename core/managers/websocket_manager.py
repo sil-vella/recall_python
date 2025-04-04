@@ -79,9 +79,9 @@ class WebSocketManager:
         self.redis_manager.expire(key, limit['window'])
 
     def store_session_data(self, session_id: str, session_data: Dict[str, Any]):
-        """Store session information in Redis."""
+        """Store session data in Redis."""
         try:
-            # Convert sets to lists for Redis storage
+            # Convert any sets to lists for JSON serialization
             data_to_store = session_data.copy()
             if 'rooms' in data_to_store and isinstance(data_to_store['rooms'], set):
                 data_to_store['rooms'] = list(data_to_store['rooms'])
@@ -103,14 +103,36 @@ class WebSocketManager:
         try:
             data = self.redis_manager.get(f"ws:session:{session_id}")
             if data:
-                # Convert lists back to sets
+                # Convert lists back to sets for internal use
                 if 'rooms' in data:
                     data['rooms'] = set(data['rooms'])
                 if 'user_roles' in data:
                     data['user_roles'] = set(data['user_roles'])
+                    
+                # Create a copy for client use with lists instead of sets
+                client_data = data.copy()
+                if 'rooms' in client_data and isinstance(client_data['rooms'], set):
+                    client_data['rooms'] = list(client_data['rooms'])
+                if 'user_roles' in client_data and isinstance(client_data['user_roles'], set):
+                    client_data['user_roles'] = list(client_data['user_roles'])
+                    
+                # Store the client-safe version in the data
+                data['_client_data'] = client_data
+                
             return data
         except Exception as e:
             custom_log(f"Error getting session data: {str(e)}")
+            return None
+
+    def get_client_session_data(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get session data in a format safe for client transmission."""
+        try:
+            data = self.get_session_data(session_id)
+            if data and '_client_data' in data:
+                return data['_client_data']
+            return None
+        except Exception as e:
+            custom_log(f"Error getting client session data: {str(e)}")
             return None
 
     def cleanup_session_data(self, session_id: str):
@@ -178,10 +200,26 @@ class WebSocketManager:
                         'token_type': payload.get('type'),
                         'connected_at': datetime.utcnow().isoformat(),
                         'last_active': datetime.utcnow().isoformat(),
-                        'rooms': set(),  # Track rooms this session is in
+                        'rooms': [],  # Initialize as empty list
                         'client_id': request.headers.get('X-Client-ID', session_id),
                         'origin': request.headers.get('Origin', '')
                     }
+                    
+                    # Convert any sets to lists for JSON serialization
+                    if 'user_roles' in payload:
+                        if isinstance(payload['user_roles'], set):
+                            session_data['user_roles'] = list(payload['user_roles'])
+                        else:
+                            session_data['user_roles'] = list(payload['user_roles']) if payload['user_roles'] else []
+                    else:
+                        session_data['user_roles'] = []
+                    
+                    # Ensure all data is JSON serializable
+                    for key, value in session_data.items():
+                        if isinstance(value, (set, datetime)):
+                            session_data[key] = str(value)
+                        elif isinstance(value, (int, float)):
+                            session_data[key] = str(value)
                     
                     custom_log(f"Storing session data for {session_id}: {session_data}")
                     
@@ -197,7 +235,7 @@ class WebSocketManager:
                         self.update_user_presence(session_data['user_id'], 'online')
                     
                     # Send session data to client
-                    custom_log(f"Sending session data to client {session_id}")
+                    custom_log(f"Sending session data to client {session_id}: {session_data}")
                     self.socketio.emit('session_data', session_data, room=session_id)
                     
                     custom_log(f"WebSocket connection established for session {session_id}")
@@ -251,18 +289,11 @@ class WebSocketManager:
                     custom_log(f"Error in disconnect handler for session {request.sid}: {str(e)}")
 
             @self.socketio.on('join')
-            def handle_join(data):
+            def handle_join(data=None):
                 try:
                     session_id = request.sid
                     custom_log(f"Join request received for session {session_id}: {data}")
                     
-                    # Get room ID from request
-                    room_id = data.get('room_id')
-                    if not room_id:
-                        custom_log(f"No room_id provided in join request for session {session_id}")
-                        self.socketio.emit('error', {'message': 'Room ID required'}, room=session_id)
-                        return
-                        
                     # Get session data
                     session_data = self.get_session_data(session_id)
                     if not session_data:
@@ -270,21 +301,27 @@ class WebSocketManager:
                         self.socketio.emit('error', {'message': 'Session not found'}, room=session_id)
                         return
                         
-                    custom_log(f"Attempting to join room {room_id} for session {session_id}")
+                    # Convert any sets in session data to lists
+                    if 'rooms' in session_data and isinstance(session_data['rooms'], set):
+                        session_data['rooms'] = list(session_data['rooms'])
+                    if 'user_roles' in session_data and isinstance(session_data['user_roles'], set):
+                        session_data['user_roles'] = list(session_data['user_roles'])
+                        
+                    custom_log(f"Attempting to join room {data['room_id']} for session {session_id}")
                     
                     # Join room
-                    if self.join_room(room_id, session_id):
-                        custom_log(f"Successfully joined room {room_id} for session {session_id}")
+                    if self.join_room(data['room_id'], session_id):
+                        custom_log(f"Successfully joined room {data['room_id']} for session {session_id}")
                         self.socketio.emit('join_response', {
                             'success': True,
-                            'room_id': room_id,
+                            'room_id': data['room_id'],
                             'message': 'Successfully joined room'
                         }, room=session_id)
                     else:
-                        custom_log(f"Failed to join room {room_id} for session {session_id}")
+                        custom_log(f"Failed to join room {data['room_id']} for session {session_id}")
                         self.socketio.emit('join_response', {
                             'success': False,
-                            'room_id': room_id,
+                            'room_id': data['room_id'],
                             'message': 'Failed to join room'
                         }, room=session_id)
                         
@@ -426,6 +463,9 @@ class WebSocketManager:
             try:
                 # Skip validation for special events
                 if event in ['connect', 'disconnect']:
+                    # For connect event, ensure we're not passing any data that might contain sets
+                    if event == 'connect':
+                        return handler()
                     return handler(data)
                     
                 # Ensure data is a dictionary if None is provided
@@ -436,7 +476,7 @@ class WebSocketManager:
                 error = self.validator.validate_event_payload(event, data)
                 if error:
                     custom_log(f"Validation error in {event} handler: {error}")
-                    return {'status': 'error', 'message': error}
+                    return {'status': 'error', 'message': str(error)}
                     
                 # Validate message size based on event type
                 if event == 'message':
@@ -448,9 +488,19 @@ class WebSocketManager:
                     
                 if error:
                     custom_log(f"Message size validation error in {event} handler: {error}")
-                    return {'status': 'error', 'message': error}
+                    return {'status': 'error', 'message': str(error)}
                     
-                return handler(data)
+                # Ensure data is JSON serializable
+                serializable_data = {}
+                for key, value in data.items():
+                    if isinstance(value, (set, datetime)):
+                        serializable_data[key] = str(value)
+                    elif isinstance(value, (int, float)):
+                        serializable_data[key] = str(value)
+                    else:
+                        serializable_data[key] = value
+                        
+                return handler(serializable_data)
             except Exception as e:
                 custom_log(f"Error in {event} handler: {str(e)}")
                 return {'status': 'error', 'message': str(e)}
@@ -462,17 +512,33 @@ class WebSocketManager:
             try:
                 # Skip validation for special events
                 if event in ['connect', 'disconnect']:
+                    # For connect event, ensure we're not passing any data that might contain sets
+                    if event == 'connect':
+                        return handler()
                     return handler(data)
                     
                 # Ensure data is a dictionary if None is provided
                 if data is None:
                     data = {}
                     
+                # Get session data
+                session_id = request.sid
+                session_data = self.get_session_data(session_id)
+                if not session_data:
+                    custom_log(f"No session data found for {session_id}")
+                    return {'status': 'error', 'message': 'Session not found'}
+                    
+                # Convert any sets in session data to lists
+                if 'rooms' in session_data and isinstance(session_data['rooms'], set):
+                    session_data['rooms'] = list(session_data['rooms'])
+                if 'user_roles' in session_data and isinstance(session_data['user_roles'], set):
+                    session_data['user_roles'] = list(session_data['user_roles'])
+                    
                 # Validate event payload
                 error = self.validator.validate_event_payload(event, data)
                 if error:
                     custom_log(f"Validation error in {event} handler: {error}")
-                    return {'status': 'error', 'message': error}
+                    return {'status': 'error', 'message': str(error)}
                     
                 # Validate message size based on event type
                 if event == 'message':
@@ -484,9 +550,20 @@ class WebSocketManager:
                     
                 if error:
                     custom_log(f"Message size validation error in {event} handler: {error}")
-                    return {'status': 'error', 'message': error}
+                    return {'status': 'error', 'message': str(error)}
                     
-                return handler(data)
+                # Ensure data is JSON serializable
+                serializable_data = {}
+                for key, value in data.items():
+                    if isinstance(value, (set, datetime)):
+                        serializable_data[key] = str(value)
+                    elif isinstance(value, (int, float)):
+                        serializable_data[key] = str(value)
+                    else:
+                        serializable_data[key] = value
+                        
+                # Call handler with both data and session_data
+                return handler(serializable_data, session_data)
             except Exception as e:
                 custom_log(f"Error in {event} handler: {str(e)}")
                 return {'status': 'error', 'message': str(e)}

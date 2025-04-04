@@ -218,23 +218,30 @@ class WebSocketModule:
         self.websocket_manager.cleanup_session(session_id)
         custom_log(f"WebSocket disconnected: {session_id}")
 
-    def _handle_join(self, data):
+    def _handle_join(self, data, session_data):
         """Handle join room event."""
         try:
-            room_id = data.get('room_id')
+            room_id = data.get('room_id') if data else None
             if not room_id:
                 custom_log("No room_id provided in join event")
                 return
                 
-            # Get session data from WebSocket manager
+            # Get session data from WebSocket manager if not provided
             session_id = request.sid
-            session_data = self.websocket_manager.get_session_data(session_id)
             if not session_data:
-                custom_log("No session data found for join event")
-                return
+                session_data = self.websocket_manager.get_session_data(session_id)
+                if not session_data:
+                    custom_log("No session data found for join event")
+                    return
+                    
+            # Convert any sets to lists for JSON serialization
+            if 'rooms' in session_data and isinstance(session_data['rooms'], set):
+                session_data['rooms'] = list(session_data['rooms'])
+            if 'user_roles' in session_data and isinstance(session_data['user_roles'], set):
+                session_data['user_roles'] = list(session_data['user_roles'])
                 
             # Check if user is already in the room
-            if room_id in session_data.get('rooms', set()):
+            if room_id in session_data.get('rooms', []):
                 custom_log(f"User {session_data.get('username')} already in room {room_id}")
                 return
                 
@@ -242,7 +249,10 @@ class WebSocketModule:
             self.websocket_manager.join_room(room_id, session_id)
             
             # Update session data with room membership
-            session_data['rooms'].add(room_id)
+            if 'rooms' not in session_data:
+                session_data['rooms'] = []
+            if room_id not in session_data['rooms']:
+                session_data['rooms'].append(room_id)
             self.websocket_manager.store_session_data(session_id, session_data)
             
             # Update room permissions
