@@ -10,7 +10,7 @@ from ..game_events_module.event_validators import GameEventValidators
 from datetime import datetime
 
 class GameEventHandlers:
-    """Handles game-specific WebSocket events."""
+    """Handles game-specific WebSocket events for the Dutch card game."""
     
     def __init__(self, websocket_manager: WebSocketManager, state_manager: StateManager,
                  rules_engine: GameRulesEngine, action_validator: GameActionValidator,
@@ -142,16 +142,80 @@ class GameEventHandlers:
                 emit('error', {'message': 'Player not in game'}, room=session_id)
                 return
                 
-            # Process the action (to be implemented by game rules)
-            # This is a placeholder for the actual game logic
-            action_result = {
-                'user_id': user_id,
-                'action': action,
-                'timestamp': datetime.utcnow().isoformat()
-            }
+            # Get the player
+            player = session.players[user_id]
             
-            # Broadcast the action to all players
-            emit('game_action', action_result, room=game_session_id)
+            # Validate and process the action
+            is_valid, error_msg = self.rules_engine.validate_action(session, player, action)
+            if not is_valid:
+                emit('error', {'message': error_msg}, room=session_id)
+                return
+                
+            success, error_msg, result = self.rules_engine.process_action(session, player, action)
+            if not success:
+                emit('error', {'message': error_msg}, room=session_id)
+                return
+                
+            # Check if the game is over
+            game_over, winner = self.rules_engine.check_win_condition(session)
+            if game_over:
+                # Emit game over event
+                emit('game_over', {
+                    'winner': winner.to_dict() if winner else None,
+                    'reason': 'dutch_called' if session.dutch_called else 'rounds_complete'
+                }, room=game_session_id)
+                
+                # End the game
+                session.end_game()
+                self.state_manager.update_session(session)
+            else:
+                # Broadcast the action to all players
+                action_type = action.get('type')
+                if action_type == 'play_card':
+                    emit('card_played', result, room=game_session_id)
+                elif action_type == 'call_dutch':
+                    emit('dutch_called', result, room=game_session_id)
+                else:
+                    emit('game_action', result, room=game_session_id)
+                
+        except Exception as e:
+            emit('error', {'message': f'Failed to process game action: {str(e)}'}, room=session_id)
+            
+    def handle_start_game(self, session_id: str, data: Dict[str, Any]) -> None:
+        """Handle starting a game session."""
+        try:
+            game_session_id = data.get('session_id')
+            if not game_session_id:
+                emit('error', {'message': 'Missing session ID'}, room=session_id)
+                return
+                
+            session = self.state_manager.get_session(game_session_id)
+            if not session:
+                emit('error', {'message': 'Game session not found'}, room=session_id)
+                return
+                
+            # Get user data
+            user_data = self.ws_manager.get_session_data(session_id)
+            if not user_data:
+                emit('error', {'message': 'User session not found'}, room=session_id)
+                return
+                
+            user_id = str(user_data['id'])
+            
+            # Validate player is in the game
+            if user_id not in session.players:
+                emit('error', {'message': 'Player not in game'}, room=session_id)
+                return
+                
+            # Start the game
+            session.start_game()
+            this.state_manager.update_session(session)
+            
+            # Emit game started event
+            emit('game_started', {
+                'session_id': game_session_id,
+                'game_state': session.to_dict()
+            }, room=game_session_id)
             
         except Exception as e:
-            emit('error', {'message': f'Failed to process game action: {str(e)}'}, room=session_id) 
+            emit('error', {'message': f'Failed to start game: {str(e)}'}, room=session_id) 

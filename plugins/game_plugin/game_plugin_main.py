@@ -74,6 +74,7 @@ class GamePlugin:
             app_manager.websocket_manager.register_authenticated_handler('join_game', game_event_handlers.handle_join_game)
             app_manager.websocket_manager.register_authenticated_handler('leave_game', game_event_handlers.handle_leave_game)
             app_manager.websocket_manager.register_authenticated_handler('game_action', game_event_handlers.handle_game_action)
+            app_manager.websocket_manager.register_authenticated_handler('start_game', game_event_handlers.handle_start_game)
 
             # Register API routes
             self._register_routes(app_manager)
