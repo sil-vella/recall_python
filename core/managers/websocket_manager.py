@@ -552,18 +552,9 @@ class WebSocketManager:
             # Get room permissions from Redis
             room_permissions = self.redis_manager.get(f"ws:room:{room_id}:permissions")
             if not room_permissions:
-                # Room doesn't exist, create it with default public permission
-                custom_log(f"Room {room_id} doesn't exist, creating with default permissions")
-                room_data = {
-                    "permission": "public",
-                    "owner_id": str(user_id),
-                    "allowed_users": [],
-                    "allowed_roles": [],
-                    "created_at": datetime.utcnow().isoformat(),
-                    "size": "0"
-                }
-                self._update_room_permissions(room_id, room_data, session_id)
-                return True
+                # Room doesn't exist, return False
+                custom_log(f"Room {room_id} doesn't exist")
+                return False
 
             # Parse room permissions
             permission_type = room_permissions.get("permission", "public")
@@ -837,7 +828,6 @@ class WebSocketManager:
                                 item 
                                 for item in value
                             ]
-                            custom_log(f"DEBUG - Processed list in {key}: {serializable_data[key]}")
                         elif isinstance(value, dict):
                             # Handle nested dictionaries
                             serializable_data[key] = {
@@ -846,8 +836,9 @@ class WebSocketManager:
                                     v)
                                 for k, v in value.items()
                             }
-                            custom_log(f"DEBUG - Processed dict in {key}: {serializable_data[key]}")
-                
+                        else:
+                            serializable_data[key] = value
+                        
                 # Log the final serializable data
                 custom_log(f"DEBUG - Final serializable data: {serializable_data}")
                 
@@ -1070,6 +1061,13 @@ class WebSocketManager:
             if not session_data:
                 custom_log(f"No session data found for {session_id}")
                 self.socketio.emit('error', {'message': 'Session not found'}, room=session_id)
+                return False
+                
+            # Check if room exists first - this must be the first check after session validation
+            room_permissions = self.redis_manager.get(f"ws:room:{room_id}:permissions")
+            if not room_permissions:
+                custom_log(f"Room {room_id} does not exist")
+                self.socketio.emit('error', {'message': 'Room does not exist'}, room=session_id)
                 return False
                 
             # Update session data with user_id and roles if provided

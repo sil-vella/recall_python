@@ -12,6 +12,8 @@ from datetime import datetime
 import time
 import uuid
 import logging
+from flask import request
+from typing import Dict, Any
 
 class ConnectionAPI:
     def __init__(self, app_manager=None):
@@ -38,6 +40,9 @@ class ConnectionAPI:
         if not hasattr(app, "add_url_rule"):
             raise RuntimeError("ConnectionAPI requires a valid Flask app instance.")
         self.app = app
+        
+        # Register the refresh token endpoint
+        self.register_route("/auth/refresh", self.refresh_token_endpoint, methods=["POST"])
 
     def _create_connection_pool(self):
         """Create a PostgreSQL connection pool with security features."""
@@ -570,29 +575,32 @@ class ConnectionAPI:
             custom_log(f"❌ Error validating access token: {e}")
             return None
 
-    def refresh_user_tokens(self, refresh_token):
-        """Refresh user tokens using a valid refresh token."""
+    def refresh_user_tokens(self, refresh_token: str) -> Dict[str, Any]:
+        """Refresh user's access and refresh tokens."""
         try:
-            # Validate refresh token
-            payload = self.jwt_manager.validate_token(refresh_token, TokenType.REFRESH)
-            if not payload:
-                return None
-                
-            user_id = payload.get('id')  # Changed from user_id to id
-            if not user_id:
-                return None
-                
-            # Get user data from Redis
-            user_data = self.redis_manager.get(f"user:{user_id}")
-            if not user_data:
-                return None
-                
-            # Create new tokens
-            return self.create_user_tokens(user_data)
+            # Verify refresh token
+            user_data = self.jwt_manager.verify_token(refresh_token)
+            if not user_data or "user_id" not in user_data:
+                self.logger.error("Invalid refresh token: Token verification failed")
+                return {"error": "Invalid refresh token"}, 401
+
+            # Get user from database
+            user = self.fetch_from_db(f"SELECT id, username, email FROM users WHERE id = %s", (user_data["user_id"],), as_dict=True)
+            if not user:
+                self.logger.error(f"User not found for ID: {user_data['user_id']}")
+                return {"error": "User not found"}, 404
+
+            # Generate new tokens
+            new_tokens = self.create_user_tokens(user)
+            if not new_tokens:
+                self.logger.error("Failed to generate new tokens")
+                return {"error": "Failed to generate new tokens"}, 500
+
+            return {"tokens": new_tokens}, 200
 
         except Exception as e:
-            custom_log(f"❌ Error refreshing user tokens: {e}")
-            return None
+            self.logger.error(f"Error refreshing tokens: {str(e)}")
+            return {"error": "Failed to refresh tokens"}, 500
 
     def revoke_user_tokens(self, user_id):
         """Revoke all tokens for a user."""
@@ -614,3 +622,22 @@ class ConnectionAPI:
                 sessions,
                 expire=self.session_timeout
             )
+
+    def refresh_token_endpoint(self):
+        """Endpoint to refresh user tokens."""
+        try:
+            data = request.get_json()
+            if not data or "refresh_token" not in data:
+                return {"error": "Refresh token is required"}, 400
+                
+            refresh_token = data["refresh_token"]
+            result, status_code = self.refresh_user_tokens(refresh_token)
+            
+            if status_code != 200:
+                return result, status_code
+                
+            return result, 200
+            
+        except Exception as e:
+            self.logger.error(f"Error in refresh token endpoint: {str(e)}")
+            return {"error": "Internal server error"}, 500
