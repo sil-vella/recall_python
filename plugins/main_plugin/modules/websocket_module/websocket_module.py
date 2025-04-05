@@ -245,9 +245,11 @@ class WebSocketModule:
                 custom_log(f"User {session_data.get('username')} already in room {room_id}")
                 return
                 
-            # Join room
-            self.websocket_manager.join_room(room_id, session_id)
-            
+            # Join room - stop processing if join fails
+            if not self.websocket_manager.join_room(room_id, session_id):
+                custom_log(f"Failed to join room {room_id}")
+                return
+                
             # Update session data with room membership
             if 'rooms' not in session_data:
                 session_data['rooms'] = []
